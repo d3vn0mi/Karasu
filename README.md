@@ -11,7 +11,9 @@ Built for portable / field use: one control script with a `setup` mode and live 
 - **Self-contained AP** — `hostapd` + `dnsmasq`, isolated by default; optional one-command internet sharing (NAT) out through an uplink
 - **Dual-homed transfer** — Wi-Fi laptops and a wired workstation on `eth0` reach the same server; the Pi is a shared drop between them, no routing needed. The server binds IPv4 **and** IPv6
 - **Streaming uploads** — the Go server uses `MultipartReader` → `io.Copy`, so multi-GB files never buffer in RAM; single static binary that cross-compiles to any Pi
-- **Clean web UI** — drag-and-drop upload with a progress bar, a styled file table (name / size / modified, newest first), light & dark themes; browse + download at `/`, upload at `/upload` (multipart field `files`)
+- **Folder-aware** — browse into subfolders (breadcrumbs, dirs-first, filter), upload whole folders (picker **or** drag-drop, structure preserved), and download any folder — or a multi-select of items — as a streamed `.zip`
+- **Clean web UI** — drag-and-drop with per-transfer progress, a sortable file table, light & dark themes; delete / rename / new-folder from the page; scriptable endpoints (`PUT`, `?json`, `?sha`, `/healthz`) for CLI use
+- **Safe by construction** — every path confined to the served dir (traversal + zip-slip can't escape), atomic temp-then-rename writes (no half-files served), disk-space guard, and a `-readonly` switch
 - **Modal control** — `setup` once; then `pi-ap ssid|pass|hidden|channel|ethmac|hostname|share|restart|show|status` apply live, no reboot, no re-provision
 - **Hardened** — server runs as a non-root `updrop` user under a systemd sandbox
 - **Self-monitoring** — health-check timer verifies the whole stack every 5 minutes
@@ -166,15 +168,52 @@ sudo pi-ap status     # full health check (add --no-upload for read-only)
 sudo pi-ap restart    # bounce the whole stack
 ```
 
-## Upload / download
+## Upload / download / manage
+
+Everything works from the web UI (`http://karasu/`) — drag files **or whole folders** onto the page (or use **Upload files** / **Upload folder**), browse into subfolders, tick items to download or delete, and grab any folder as a zip. It's also fully scriptable:
 
 ```bash
-# upload (field name is 'files'; multiple allowed):
-curl -F 'files=@disk.img' http://karasu.local/upload
-curl -F 'files=@a' -F 'files=@b' http://karasu.local/upload
+# upload files (field 'files'; multiple allowed)
+curl -F 'files=@disk.img' http://karasu/upload
+curl -F 'files=@a' -F 'files=@b' http://karasu/upload
+
+# raw streamed upload — nicer for one big file (creates parent dirs)
+curl -T ./loot.tar http://karasu/cases/2026/loot.tar
+
+# download a whole folder as a streamed zip
+curl -o cases.zip 'http://karasu/cases/?zip'
+
+# machine-readable listing + integrity
+curl 'http://karasu/?json'
+curl 'http://karasu/cases/loot.tar?sha'      # sha-256 of one file
 ```
 
-Browse and download by opening `http://karasu.local/` in a browser. Uploaded files land in `/srv/updrop` (owned by the `updrop` user).
+Uploaded files land in `/srv/updrop` (owned by the `updrop` user).
+
+**Endpoints**
+
+| Method / path | Does |
+|---|---|
+| `GET /<dir>/` | browse (HTML); `?zip` downloads the folder, `?json` returns a listing |
+| `GET /<file>` | download (Range-enabled); `?dl` forces attachment, `?sha` returns sha-256 |
+| `POST /upload?dir=<sub>` | multipart upload (field `files`); a part's filename may be a **relative path** (folder upload) |
+| `PUT /<path>` | raw streamed upload; creates parent dirs |
+| `POST /zip` | stream a zip of selected `paths[]` (multi-select download) |
+| `POST /mkdir` · `/rename` · `/delete` | form ops — `path` · `from`,`to` · `path` (repeatable) |
+| `GET /healthz` | JSON: status, version, free space (cheap liveness probe) |
+
+**Server options** (flags on the `updrop` binary — set them in `updrop.service`'s `ExecStart`, or when running by hand)
+
+| Flag | Default | Notes |
+|---|---|---|
+| `-port` / `-dir` / `-bind` | `8000` / `.` / `::` | listen port, served dir, bind address (setup passes `80 /srv/updrop ::`) |
+| `-readonly` | off | disable **all** writes (upload/PUT/mkdir/rename/delete) — browse + download only |
+| `-overwrite` | off | overwrite on name collision (default: keep both, add ` (n)`) |
+| `-maxupload` | `0` | max MB per uploaded file (0 = unlimited) → clean `413` when exceeded |
+| `-minfree` | `16` | refuse writes when free space would drop below this many MB → `507` |
+| `-version` | — | print version and exit |
+
+Safety is always on: every path is confined to `-dir` (directory traversal and zip-slip can't escape it), uploads are written to a temp file and atomically renamed (a half-transfer is never listed or served), and the disk guard stops a runaway upload from filling the card.
 
 ## Connecting a client
 
@@ -356,7 +395,8 @@ Also created: a system user `updrop` (nologin) that the server runs as.
 - **Hidden ≠ secure.** `HIDDEN=1` only omits the SSID from beacons; it still leaks in probe/association frames and is trivially recovered (`airodump-ng`). Treat it as cosmetic.
 - Isolated AP by default — no route to any other network. `pi-ap share on` deliberately reverses this: it enables IP forwarding and NATs clients out through the uplink, so treat the clients as being on the internet from that point. `share off` restores isolation.
 - **`eth0` DHCP is for a *direct* cable only.** On a shared network it would be a rogue DHCP server — set `ETH_DHCP=0` and use a static IP there instead. In share mode it *also* advertises a gateway, so double-check you're on a dedicated cable before enabling it.
-- The upload server has **no authentication** — anyone on the Wi-Fi or the wire can upload and download. That's fine for an isolated, trusted drop; add HTTP Basic auth + TLS before exposing it anywhere less trusted. It does run as a non-root user under a systemd sandbox (`ProtectSystem=strict`, `NoNewPrivileges`, writable only within `UPLOAD_DIR`).
+- The upload server has **no authentication or TLS yet** — anyone who can reach the port can browse, download, upload, **and now delete/rename/mkdir**. That's fine for an isolated, trusted drop; it's the reason auth + TLS are the next milestone. Two mitigations ship today: run it `-readonly` when you only need to hand files *out* (kills every write path), and it still runs as a non-root `updrop` user under a systemd sandbox (`ProtectSystem=strict`, `NoNewPrivileges`, writable only within `UPLOAD_DIR`).
+- **Paths are confined, uploads are atomic.** Directory traversal and zip-slip are blocked (every request path is cleaned and re-checked against the served dir, symlinks included); uploads land via temp-then-rename so a half-transfer is never served; and `-minfree` stops an upload from filling the SD card.
 
 ## Troubleshooting
 

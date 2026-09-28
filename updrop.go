@@ -1,5 +1,6 @@
 // =============================================================================
-//  updrop  -  v0.2  (Go)
+//  updrop  (Go)
+//  Author: d3vn0mi
 //  HTTP file server with a STREAMING upload endpoint and a clean web UI.
 //    GET  /            styled index: drag-drop upload + file table (browse/download)
 //    POST /upload      streamed multipart -> disk (constant memory; field: files)
@@ -8,17 +9,18 @@
 //  Uploads stream via r.MultipartReader() + io.Copy, so a multi-GB file never
 //  gets buffered in RAM. Single static binary, Go stdlib only.
 //
-//  Build (on the Pi):        go build -o updrop updrop_v0.2.go
-//  Cross-compile from x86:   GOOS=linux GOARCH=arm64 go build -o updrop updrop_v0.2.go   # Pi 3/4/5, 64-bit OS
-//                            GOOS=linux GOARCH=arm GOARM=7 go build -o updrop updrop_v0.2.go  # 32-bit OS / Zero 2 W
-//  Run:                      ./updrop -port 8000 -dir /srv/updrop -bind 192.168.50.1
+//  Bind:
+//    -bind ::          all interfaces, IPv4 + IPv6 (dual-stack on Linux) -- default for dual-homed use
+//    -bind 0.0.0.0     all IPv4 interfaces only
+//    -bind 192.168.x.x a single address
 //
-//  curl upload:  curl -F 'files=@file.bin' http://<pi-ip>:8000/upload
+//  Build (on the Pi):        go build -o updrop updrop.go
+//  Cross-compile from x86:   GOOS=linux GOARCH=arm64 go build -o updrop updrop.go   # Pi 3/4/5, 64-bit OS
+//                            GOOS=linux GOARCH=arm GOARM=7 go build -o updrop updrop.go  # 32-bit OS / Zero 2 W
+//  Run:                      ./updrop -port 8000 -dir /srv/updrop -bind ::
 //
-//  Changelog:
-//    v0.2  professional web UI: styled index, drag-drop upload w/ progress bar,
-//          sortable-by-recency file table; Post/Redirect/Get; plain-text reply for curl
-//    v0.1  initial (streaming upload, minimal form + default dir listing)
+//  curl upload:  curl -F 'files=@file.bin' http://<ip>:8000/upload
+//
 // =============================================================================
 package main
 
@@ -28,11 +30,13 @@ import (
 	"html"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -144,15 +148,15 @@ func renderIndex(w http.ResponseWriter, _ *http.Request) {
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	io.WriteString(w, `<!doctype html><html lang="en"><head><meta charset="utf-8">`)
-	io.WriteString(w, `<meta name="viewport" content="width=device-width, initial-scale=1"><title>updrop</title><style>`)
+	io.WriteString(w, `<meta name="viewport" content="width=device-width, initial-scale=1"><title>Yatagarasu</title><style>`)
 	io.WriteString(w, cssBlock)
-	io.WriteString(w, `</style></head><body><div class="wrap"><header><h1>updrop</h1><span class="sub">`)
+	io.WriteString(w, `</style></head><body><div class="wrap"><header><h1>Yatagarasu</h1><span class="sub">`)
 	fmt.Fprintf(w, "%d file(s) &middot; drag &amp; drop or click to upload", len(files))
 	io.WriteString(w, `</span></header>`)
 	io.WriteString(w, formBlock)
 	io.WriteString(w, `<table><thead><tr><th>Name</th><th class="num">Size</th><th class="mut">Modified</th></tr></thead><tbody>`)
 	io.WriteString(w, tbody.String())
-	io.WriteString(w, `</tbody></table><footer>updrop &middot; served over your Pi access point</footer></div><script>`)
+	io.WriteString(w, `</tbody></table><footer>Yatagarasu &middot; served over your Pi access point</footer></div><script>`)
 	io.WriteString(w, jsBlock)
 	io.WriteString(w, `</script></body></html>`)
 }
@@ -219,7 +223,7 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
 
 func main() {
 	port := flag.Int("port", 8000, "listen port")
-	bind := flag.String("bind", "0.0.0.0", "bind address")
+	bind := flag.String("bind", "::", "bind address (:: = all IPv4+IPv6, 0.0.0.0 = all IPv4, or one address)")
 	dir := flag.String("dir", ".", "directory to serve and save into")
 	flag.Parse()
 
@@ -243,8 +247,8 @@ func main() {
 		fs.ServeHTTP(w, r) // download individual files (safe paths + Range support)
 	})
 
-	addr := fmt.Sprintf("%s:%d", *bind, *port)
-	log.Printf("updrop v0.2  dir=%s  addr=%s", uploadDir, addr)
-	log.Printf("  open http://<pi-ip>:%d/", *port)
+	addr := net.JoinHostPort(*bind, strconv.Itoa(*port)) // formats IPv6 with brackets
+	log.Printf("updrop  dir=%s  addr=%s", uploadDir, addr)
+	log.Printf("  reachable on all bound interfaces at port %d", *port)
 	log.Fatal(http.ListenAndServe(addr, mux))
 }

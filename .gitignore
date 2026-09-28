@@ -1,0 +1,20 @@
+# compiled server binary — build it with: go build -o updrop updrop.go
+/updrop
+/updrop-*
+*.exe
+
+# Go build / test artifacts
+*.o
+*.test
+*.out
+
+# editor / OS cruft
+*~
+*.swp
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# logs / scratch
+*.log

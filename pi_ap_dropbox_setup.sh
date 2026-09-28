@@ -1,41 +1,57 @@
 #!/usr/bin/env bash
 # =============================================================================
-#  pi_ap_dropbox  -  v0.5
-#  Raspberry Pi Wi-Fi Access Point + file-upload web server. Modal control.
+#  Yatagarasu  |  pi_ap_dropbox_setup  |  Author: d3vn0mi
+#  Portable Raspberry Pi Wi-Fi Access Point + wired workstation link + file-drop server.
+#  (Yatagarasu — the three-legged guiding crow, a RavenSec relay. Repo: RPid-dropbox.)
 #
 #  MODES:
-#    setup                      full provision (packages, NM unmanage, user,
-#                               server, hostapd/dnsmasq/units, monitor)
+#    setup                      full provision (Wi-Fi AP, eth0 link, server, monitor)
 #    ssid <NAME>                change SSID              (live, restarts hostapd)
 #    pass <PASSPHRASE>          change WPA2 passphrase   (live, restarts hostapd)
 #    hidden <on|off>            toggle SSID broadcast    (live, restarts hostapd)
 #    channel <N>                change channel           (live, restarts hostapd)
+#    ethmac <keep|random|MAC>   set eth0 MAC before plugging in (live + persists)
+#    hostname <NAME>            set the Pi hostname -> <NAME>.local (mDNS)
+#    share <on|off|status>      share the Pi's internet to clients (NAT via uplink)
 #    restart                    restart the whole stack
-#    show                       print current AP config (incl. TX power + regdom)
+#    show                       print current config (Wi-Fi + eth0 + bind + services)
 #    status [hc args...]        run the health check
 #
-#  Ops modes edit the DEPLOYED config in /etc and restart only what's needed
-#  (no reboot, no re-provision). 'setup' installs this script as
-#  /usr/local/bin/pi-ap, so afterwards:  sudo pi-ap hidden off
+#  Dual-homed: laptops join the Wi-Fi, a workstation plugs into eth0, and both
+#  reach the SAME updrop server (bound to :: = all IPv4+IPv6). Files land in one
+#  place, visible to both sides. With 'share' off (default) the two client nets
+#  are isolated and get NO internet — just the drop server. With 'share' on, an
+#  uplink NIC's internet is NAT'd out to both client nets.
 #
-#  Run    : sudo bash pi_ap_dropbox_v0.5.sh setup
-#           (keep updrop_v0.2.go and pi_ap_healthcheck_v0.1.sh next to it)
+#  Run    : sudo bash pi_ap_dropbox_setup.sh setup
+#           (keep updrop.go and pi_ap_healthcheck.sh next to it)
+#           Run from the console or a Wi-Fi SSH session, NOT over eth0 — setup
+#           reassigns eth0's IP and will drop an eth0 SSH session.
 #
 #  Changelog:
-#    v0.5  set regulatory domain + ieee80211d=1 so the AP uses full allowed TX
-#          power (fixes weak/short-range signal); 'show' now reports TX power + regdom
-#    v0.4  modal: setup vs live ops; ops restart only affected service + verify;
-#          installs itself as /usr/local/bin/pi-ap
-#    v0.3  hidden SSID; hostapd restart-guard; non-root sandboxed user; monitor timer
-#    v0.2  build-or-install the upload server binary
+#    v0.10 rebrand: product name 'Yatagarasu'; default hostname + SSID 'karasu'
+#          (reach it at http://karasu/ in share mode, http://karasu.local otherwise)
+#    v0.9  internet sharing: SHARE_INTERNET + UPLINK_IFACE, ip_forward + iptables
+#          MASQUERADE/FORWARD via pi-ap-nat.service, 'share on|off|status' op;
+#          in share mode dnsmasq hands out Pi as gateway+DNS and resolves the Pi
+#          by name (karasu / karasu.<domain>) over unicast DNS (no mDNS needed)
+#    v0.8  hostname + mDNS (<name>.local via Avahi on wlan0/eth0); default port 80 (portless);
+#          any uplink NIC left to NetworkManager (workstation keeps its own network)
+#    v0.7  eth0 MAC option: ETH_MAC keep|random|specific + 'ethmac' op (set before plugging in)
+#    v0.6  dual-homed: eth0 static IP + optional DHCP for a wired workstation;
+#          updrop binds :: (IPv4+IPv6); 'show' reports eth0 v4/v6 + bind
+#    v0.5  regulatory domain + ieee80211d=1 (full TX power); show TX power/regdom
+#    v0.4  modal setup vs live ops; installs itself as /usr/local/bin/pi-ap
+#    v0.3  hidden SSID; hostapd restart-guard; non-root sandboxed user; monitor
+#    v0.2  build/install the upload server binary
 #    v0.1  initial
 # =============================================================================
 set -euo pipefail
 
 ### ---- CONFIG (used by 'setup' only) ----------------------------------------
 IFACE="wlan0"
-SSID="pidropbox"
-PSK="pidropbox"                                  # >= 8 chars (TEST cred — change before real use)
+SSID="karasu"
+PSK="yatagarasu"                                 # >= 8 chars (TEST cred — change before real use)
 COUNTRY="CZ"                                    # ISO-3166 regulatory domain — REQUIRED (drives TX power)
 CHANNEL="7"                                      # 2.4GHz: 1-13 (1/6/11 non-overlapping)
 HW_MODE="g"                                      # g = 2.4GHz (a = 5GHz)
@@ -46,9 +62,29 @@ DHCP_START="192.168.50.50"
 DHCP_END="192.168.50.150"
 NETMASK="255.255.255.0"
 
+# --- hostname / mDNS (reach the Pi by name, no IP or port) ---
+PI_HOSTNAME="karasu"                          # system hostname -> http://karasu.local  (mDNS)
+ENABLE_MDNS="1"                                  # advertise <PI_HOSTNAME>.local on wlan0+eth0 only (never on an uplink NIC)
+
+# --- wired workstation link (eth0) ---
+ENABLE_ETH="1"                                   # 1 = configure eth0 for a wired workstation
+ETH_IFACE="eth0"
+ETH_MAC="keep"                                   # eth0 MAC before it hits the wire: keep | random | AA:BB:CC:DD:EE:FF
+ETH_IP="192.168.60.1"                            # Pi's fixed address on the wire
+ETH_DHCP="1"                                     # 1 = hand the workstation an IP (SAFE ONLY on a direct/dedicated cable)
+ETH_DHCP_START="192.168.60.50"
+ETH_DHCP_END="192.168.60.150"
+
+# --- internet sharing (route clients OUT to the internet via an uplink NIC) ---
+SHARE_INTERNET="0"                               # 1 = NAT wlan0+eth0 clients out through the uplink; 0 = isolated (no internet, drop server only)
+UPLINK_IFACE="auto"                              # auto = the NIC that holds the default route (not wlan0/eth0); or set e.g. eth1, wlan1, usb0
+UPSTREAM_DNS="1.1.1.1 8.8.8.8"                   # resolvers dnsmasq forwards to in share mode (empty = use the Pi's /etc/resolv.conf)
+LOCAL_DOMAIN="lan"                               # in share mode: <PI_HOSTNAME>.<LOCAL_DOMAIN> also resolves (e.g. karasu.lan)
+
 UPLOAD_DIR="/srv/updrop"
-UPLOAD_PORT="8000"
+UPLOAD_PORT="80"                                 # 80 = reach it portless (http://karasu.local); non-root binds it via CAP_NET_BIND_SERVICE
 UPLOAD_USER="updrop"
+SERVER_BIND="::"                                 # :: = all IPv4+IPv6 ; 0.0.0.0 = all IPv4 ; or one address
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SELF="${HERE}/$(basename "${BASH_SOURCE[0]}")"
@@ -60,22 +96,20 @@ HC_SRC="${HERE}/pi_ap_healthcheck.sh"
 HC_INTERVAL="5min"
 ### --------------------------------------------------------------------------
 
-# constants shared by setup + ops
 HOSTAPD_CONF="/etc/hostapd/hostapd.conf"
 HC_UNIT="/etc/systemd/system/pi-ap-healthcheck.service"
+NAT_UNIT="/etc/systemd/system/pi-ap-nat.service"
 
 need_root(){ [[ $EUID -eq 0 ]] || { echo "run as root (use sudo)" >&2; exit 1; }; }
 require_deployed(){ [[ -f "$HOSTAPD_CONF" ]] || { echo "!! $HOSTAPD_CONF not found — run 'setup' first" >&2; exit 1; }; }
 bytelen(){ printf '%s' "$1" | wc -c; }
 
-# set key=value in hostapd.conf (order-independent; preserves file perms/owner)
 hconf_set(){
   local key="$1" val="$2" tmp; tmp="$(mktemp)"
   grep -v "^${key}=" "$HOSTAPD_CONF" > "$tmp" || true
   printf '%s=%s\n' "$key" "$val" >> "$tmp"
   cat "$tmp" > "$HOSTAPD_CONF"; rm -f "$tmp"
 }
-# sync SSID env in the monitor unit (safe for arbitrary values via awk -v)
 hc_set_ssid(){
   [[ -f "$HC_UNIT" ]] || return 0
   local v="$1" tmp; tmp="$(mktemp)"
@@ -83,12 +117,33 @@ hc_set_ssid(){
   cat "$tmp" > "$HC_UNIT"; rm -f "$tmp"
   systemctl daemon-reload
 }
-# apply the OS regulatory domain (unlocks full TX power for the country)
 set_regdomain(){
   command -v raspi-config >/dev/null 2>&1 && raspi-config nonint do_wifi_country "$COUNTRY" || true
   iw reg set "$COUNTRY" 2>/dev/null || true
 }
-# restart (or start) hostapd and confirm it actually came up
+gen_random_mac(){ printf '%02x:%02x:%02x:%02x:%02x:%02x' $(( (RANDOM & 0xFC) | 0x02 )) $((RANDOM%256)) $((RANDOM%256)) $((RANDOM%256)) $((RANDOM%256)) $((RANDOM%256)); }
+mac_apply(){                                     # iface  keep|random|AA:BB:CC:DD:EE:FF  — set NIC MAC (brings iface down/up)
+  local iface="$1" mode="${2:-keep}" mac
+  case "$mode" in
+    keep|"") return 0 ;;
+    random)  mac="$(gen_random_mac)" ;;
+    *) [[ "$mode" =~ ^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$ ]] || { echo "!! invalid MAC '$mode' (use keep|random|AA:BB:CC:DD:EE:FF)" >&2; return 1; }
+       mac="$mode" ;;
+  esac
+  ip link set dev "$iface" down 2>/dev/null || true
+  ip link set dev "$iface" address "$mac" || { echo "!! could not set MAC on $iface" >&2; return 1; }
+  ip link set dev "$iface" up 2>/dev/null || true
+  echo "${iface} MAC -> ${mac}"
+}
+set_hostname(){                                  # <name> — system hostname (+ /etc/hosts) so Avahi advertises <name>.local
+  local h="$1"
+  hostnamectl set-hostname "$h" 2>/dev/null || { echo "$h" >/etc/hostname; hostname "$h" 2>/dev/null || true; }
+  if grep -qE '^127\.0\.1\.1[[:space:]]' /etc/hosts 2>/dev/null; then
+    sed -i "s/^127\.0\.1\.1[[:space:]].*/127.0.1.1\t$h/" /etc/hosts
+  else
+    printf '127.0.1.1\t%s\n' "$h" >> /etc/hosts
+  fi
+}
 reload_hostapd(){
   if systemctl is-active --quiet hostapd; then systemctl restart hostapd; else systemctl start hostapd; fi
   sleep 1
@@ -97,7 +152,123 @@ reload_hostapd(){
     exit 1; }
 }
 
-usage(){ sed -n '4,22p' "${BASH_SOURCE[0]}" | sed 's/^#\{1,\} \{0,1\}//'; }
+# ---- INTERNET SHARING (NAT) ------------------------------------------------
+share_is_on(){ systemctl is-enabled --quiet pi-ap-nat.service 2>/dev/null; }
+resolve_uplink(){                                # print the uplink NIC (explicit, or the default-route dev that isn't wlan0/eth0)
+  if [[ "$UPLINK_IFACE" != "auto" && -n "$UPLINK_IFACE" ]]; then echo "$UPLINK_IFACE"; return 0; fi
+  ip route show default 2>/dev/null \
+    | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1)}}' \
+    | grep -vxE "${IFACE}|${ETH_IFACE}" | head -n1
+}
+nat_apply(){                                     # enable forwarding + MASQUERADE + FORWARD rules (idempotent)
+  local up; up="$(resolve_uplink)"
+  [[ -n "$up" ]] || { echo "!! no uplink interface found (set UPLINK_IFACE, or check the internet NIC has a default route)" >&2; return 1; }
+  sysctl -qw net.ipv4.ip_forward=1
+  iptables -t nat -C POSTROUTING -o "$up" -j MASQUERADE 2>/dev/null \
+    || iptables -t nat -A POSTROUTING -o "$up" -j MASQUERADE
+  local lan
+  for lan in "$IFACE" "$ETH_IFACE"; do
+    [[ "$lan" == "$ETH_IFACE" && "$ENABLE_ETH" != "1" ]] && continue
+    iptables -C FORWARD -i "$up" -o "$lan" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null \
+      || iptables -A FORWARD -i "$up" -o "$lan" -m state --state RELATED,ESTABLISHED -j ACCEPT
+    iptables -C FORWARD -i "$lan" -o "$up" -j ACCEPT 2>/dev/null \
+      || iptables -A FORWARD -i "$lan" -o "$up" -j ACCEPT
+  done
+  echo "uplink=${up}"
+}
+nat_clear(){                                     # remove our NAT/FORWARD rules; drop forwarding
+  local up; up="$(resolve_uplink)"
+  if [[ -n "$up" ]]; then
+    iptables -t nat -D POSTROUTING -o "$up" -j MASQUERADE 2>/dev/null || true
+    local lan
+    for lan in "$IFACE" "$ETH_IFACE"; do
+      iptables -D FORWARD -i "$up" -o "$lan" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+      iptables -D FORWARD -i "$lan" -o "$up" -j ACCEPT 2>/dev/null || true
+    done
+  fi
+  sysctl -qw net.ipv4.ip_forward=0 2>/dev/null || true
+}
+write_sysctl_forward(){                          # 1 = persist ip_forward across reboot ; 0 = remove
+  if [[ "${1:-0}" == "1" ]]; then
+    echo "net.ipv4.ip_forward=1" >/etc/sysctl.d/99-pi-ap.conf
+  else
+    rm -f /etc/sysctl.d/99-pi-ap.conf
+  fi
+  sysctl --system >/dev/null 2>&1 || true
+}
+write_nat_unit(){                                # oneshot that (re)applies NAT at boot and clears it on stop
+  cat >"$NAT_UNIT" <<EOF
+[Unit]
+Description=pi-ap internet sharing (NAT via uplink)
+After=network-online.target ap-ip.service$( [[ "$ENABLE_ETH" == "1" ]] && echo " eth-ip.service" )
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/pi-ap _natapply
+ExecStop=/usr/local/bin/pi-ap _natclear
+
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+write_dnsmasq_conf(){                            # <share:0|1> — regenerate /etc/dnsmasq.d/ap.conf for the current mode
+  local share="${1:-0}"
+  [[ -f /etc/dnsmasq.conf && ! -f /etc/dnsmasq.conf.orig ]] && mv /etc/dnsmasq.conf /etc/dnsmasq.conf.orig || true
+  install -d /etc/dnsmasq.d
+  rm -f /etc/dnsmasq.d/ap-hosts    # never inside the conf-dir: dnsmasq parses every file there as config (removes any stale landmine)
+  {
+    echo "interface=${IFACE}"
+    [[ "$ENABLE_ETH" == "1" && "$ETH_DHCP" == "1" ]] && echo "interface=${ETH_IFACE}"
+    echo "bind-dynamic"
+    echo "domain-needed"
+    echo "bogus-priv"
+    echo "dhcp-range=set:wlan,${DHCP_START},${DHCP_END},${NETMASK},24h"
+    if [[ "$share" == "1" ]]; then
+      echo "dhcp-option=tag:wlan,3,${AP_IP}"     # gateway = the Pi (Wi-Fi side)
+      echo "dhcp-option=tag:wlan,6,${AP_IP}"     # DNS = the Pi (dnsmasq forwards upstream)
+    else
+      echo "dhcp-option=tag:wlan,3"              # isolated: no default route
+      echo "dhcp-option=tag:wlan,6"              # isolated: no DNS override
+    fi
+    if [[ "$ENABLE_ETH" == "1" && "$ETH_DHCP" == "1" ]]; then
+      echo "dhcp-range=set:eth,${ETH_DHCP_START},${ETH_DHCP_END},${NETMASK},24h"
+      if [[ "$share" == "1" ]]; then
+        echo "dhcp-option=tag:eth,3,${ETH_IP}"   # gateway = the Pi (wired side)
+        echo "dhcp-option=tag:eth,6,${ETH_IP}"   # DNS = the Pi
+      else
+        echo "dhcp-option=tag:eth,3"             # isolated: protect the workstation's own default route
+        echo "dhcp-option=tag:eth,6"             # isolated: no DNS override
+      fi
+    fi
+    if [[ "$share" == "1" ]]; then
+      # deterministic upstream resolvers (ignore the host resolv.conf -> no 127.0.0.53 loop)
+      if [[ -n "${UPSTREAM_DNS// /}" ]]; then
+        echo "no-resolv"
+        local s; for s in $UPSTREAM_DNS; do echo "server=${s}"; done
+      fi
+      # resolve the Pi by name over unicast DNS (reliable where Windows .local/mDNS is flaky).
+      # localise-queries returns the Pi address on the SAME subnet as the asking client.
+      echo "no-hosts"
+      echo "addn-hosts=/etc/dnsmasq-ap-hosts"    # OUTSIDE /etc/dnsmasq.d (that dir is a conf-dir; a hosts file there fails to parse)
+      echo "expand-hosts"
+      echo "domain=${LOCAL_DOMAIN}"
+      echo "localise-queries"
+    fi
+  } >/etc/dnsmasq.d/ap.conf
+
+  if [[ "$share" == "1" ]]; then
+    {
+      echo "${AP_IP} ${PI_HOSTNAME}"
+      [[ "$ENABLE_ETH" == "1" ]] && echo "${ETH_IP} ${PI_HOSTNAME}"
+    } >/etc/dnsmasq-ap-hosts
+  else
+    rm -f /etc/dnsmasq-ap-hosts
+  fi
+}
+
+usage(){ sed -n '4,30p' "${BASH_SOURCE[0]}" | sed 's/^#\{1,\} \{0,1\}//'; }
 
 # ---- OPS -------------------------------------------------------------------
 op_ssid(){
@@ -131,32 +302,111 @@ op_channel(){
   hconf_set channel "$c"; reload_hostapd
   echo "[OK] channel = $c"
 }
+op_hostname(){                                   # set the Pi hostname -> <name>.local (mDNS)
+  local h="${1:-}"; [[ -n "$h" ]] || { echo "usage: $0 hostname <NAME>" >&2; exit 2; }
+  [[ "$h" =~ ^[a-zA-Z0-9][a-zA-Z0-9-]{0,62}$ ]] || { echo "!! invalid hostname (letters, digits, hyphens)" >&2; exit 2; }
+  set_hostname "$h"
+  if [[ -f /etc/avahi/avahi-daemon.conf ]]; then
+    sed -i "s/^host-name=.*/host-name=$h/" /etc/avahi/avahi-daemon.conf
+    systemctl restart avahi-daemon 2>/dev/null || true
+  fi
+  # keep the unicast-DNS name in sync if sharing is on
+  if share_is_on; then write_dnsmasq_conf 1; systemctl restart dnsmasq 2>/dev/null || true; fi
+  echo "[OK] hostname = $h  ->  http://$h.local$( share_is_on && echo "  (or http://$h / http://$h.${LOCAL_DOMAIN} via DHCP-DNS)" )"
+}
+op_ethmac(){                                     # set eth0 MAC now + persist for next boot
+  local mode="${1:-}"
+  [[ -n "$mode" ]] || { echo "usage: $0 ethmac <keep|random|AA:BB:CC:DD:EE:FF>" >&2; exit 2; }
+  case "$mode" in
+    keep|random) ;;
+    *) [[ "$mode" =~ ^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$ ]] || { echo "!! invalid MAC (use keep|random|AA:BB:CC:DD:EE:FF)" >&2; exit 2; } ;;
+  esac
+  local unit=/etc/systemd/system/eth-ip.service persisted=""
+  if [[ -f "$unit" ]] && grep -q '^Environment=ETH_MAC=' "$unit"; then
+    local tmp; tmp="$(mktemp)"
+    awk -v v="$mode" '/^Environment=ETH_MAC=/{print "Environment=ETH_MAC=" v; next}{print}' "$unit" > "$tmp"
+    cat "$tmp" > "$unit"; rm -f "$tmp"; systemctl daemon-reload
+    persisted="  (persists on reboot)"
+  fi
+  mac_apply "$ETH_IFACE" "$mode" || exit 1
+  echo "[OK] ${ETH_IFACE} MAC mode = ${mode}${persisted}"
+}
+op_share(){                                      # on|off|status — share the Pi's internet to clients
+  local m="${1:-status}"
+  case "$m" in
+    on|1|yes|true)
+      require_deployed
+      local up; up="$(resolve_uplink)"
+      [[ -n "$up" ]] || { echo "!! no uplink NIC found. Set UPLINK_IFACE in the script (e.g. eth1/wlan1/usb0) and re-run, or check the internet NIC is up with a default route." >&2; exit 1; }
+      write_nat_unit
+      write_sysctl_forward 1
+      systemctl daemon-reload
+      systemctl enable --now pi-ap-nat.service
+      write_dnsmasq_conf 1; systemctl restart dnsmasq
+      echo "[OK] internet sharing ON  (uplink=${up})"
+      echo "     clients: renew DHCP (or reconnect) to pick up the Pi as gateway + DNS"
+      echo "     name   : http://${PI_HOSTNAME}/  or  http://${PI_HOSTNAME}.${LOCAL_DOMAIN}/  (unicast DNS, no mDNS needed)"
+      ;;
+    off|0|no|false)
+      systemctl disable --now pi-ap-nat.service 2>/dev/null || true
+      nat_clear
+      write_sysctl_forward 0
+      write_dnsmasq_conf 0; systemctl restart dnsmasq 2>/dev/null || true
+      echo "[OK] internet sharing OFF (isolated) — clients renew DHCP to drop the gateway/DNS"
+      ;;
+    status|show)
+      if share_is_on; then
+        printf 'internet sharing: ON   uplink=%s   ip_forward=%s\n' "$(resolve_uplink || echo '?')" "$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null)"
+        iptables -t nat -C POSTROUTING -o "$(resolve_uplink)" -j MASQUERADE 2>/dev/null \
+          && echo 'masquerade      : present' || echo 'masquerade      : MISSING (run: sudo pi-ap share on)'
+      else
+        echo 'internet sharing: OFF (isolated — clients get the drop server only, no internet)'
+      fi
+      ;;
+    *) echo "usage: $0 share <on|off|status>" >&2; exit 2 ;;
+  esac
+}
 op_restart(){
-  systemctl restart ap-ip.service hostapd dnsmasq updrop.service
-  echo "[OK] stack restarted"
+  systemctl restart ap-ip.service hostapd dnsmasq updrop.service 2>/dev/null
+  systemctl restart eth-ip.service 2>/dev/null || true
+  share_is_on && systemctl restart pi-ap-nat.service 2>/dev/null || true
+  echo "[OK] stack restarted$( share_is_on && echo ' (internet sharing ON)' )"
 }
 op_show(){
   require_deployed
-  local ssid hid ch txp reg
+  local ssid hid ch txp reg ethv4 ethv6 ethmac bind
   ssid="$(sed -n 's/^ssid=//p' "$HOSTAPD_CONF")"
   hid="$(sed -n 's/^ignore_broadcast_ssid=//p' "$HOSTAPD_CONF")"; hid="${hid:-0}"
   ch="$(sed -n 's/^channel=//p' "$HOSTAPD_CONF")"
   txp="$(iw dev "$IFACE" info 2>/dev/null | sed -n 's/^[[:space:]]*txpower //p')"
   reg="$(iw reg get 2>/dev/null | sed -n 's/^country \([A-Z0-9]*\):.*/\1/p' | head -n1)"
-  printf 'SSID     : %s\n'   "$ssid"
-  printf 'Hidden   : %s (%s)\n' "$hid" "$( ((hid==1)) && echo hidden || echo broadcasting )"
-  printf 'Channel  : %s\n'   "$ch"
-  printf 'TX power : %s\n'   "${txp:-unknown}"
-  printf 'RegDom   : %s\n'   "${reg:-unknown}"
-  printf 'AP IP    : %s\n'   "$(ip -brief addr show "$IFACE" 2>/dev/null | awk '{print $3}')"
-  printf 'Services : hostapd=%s dnsmasq=%s updrop=%s\n' \
+  ethv4="$(ip -brief addr show "$ETH_IFACE" 2>/dev/null | awk '{print $3}')"
+  ethv6="$(ip -6 addr show "$ETH_IFACE" 2>/dev/null | sed -n 's/.*inet6 \(fe80[^/ ]*\).*/\1/p' | head -n1)"
+  ethmac="$(cat /sys/class/net/${ETH_IFACE}/address 2>/dev/null)"
+  bind="$(sed -n 's/.*-bind \([^ ]*\).*/\1/p' /etc/systemd/system/updrop.service 2>/dev/null)"
+  printf 'Host     : http://%s.local%s/\n' "$(hostname 2>/dev/null)" "$( [[ "$UPLOAD_PORT" != 80 ]] && echo ":${UPLOAD_PORT}" )"
+  printf 'SSID     : %s%s\n' "$ssid" "$( ((hid==1)) && echo '  [hidden]' )"
+  printf 'Channel  : %s   TXpower: %s   RegDom: %s\n' "$ch" "${txp:-?}" "${reg:-?}"
+  printf 'Wi-Fi IP : %s/24\n' "$AP_IP"
+  printf 'Eth0 IP  : %s\n' "${ethv4:-not configured}"
+  printf 'Eth0 MAC : %s\n' "${ethmac:-?}"
+  printf 'Eth0 v6  : %s%s\n' "${ethv6:-none}" "$( [[ -n "$ethv6" ]] && echo "%${ETH_IFACE} (link-local)" )"
+  if share_is_on; then
+    printf 'Internet : shared via %s (NAT)  ->  clients get gateway+DNS = the Pi\n' "$(resolve_uplink || echo '?')"
+  else
+    printf 'Internet : isolated (clients get the drop server only; run: sudo pi-ap share on)\n'
+  fi
+  printf 'Server   : bind=%s port=%s dir=%s\n' "${bind:-?}" "$UPLOAD_PORT" "$UPLOAD_DIR"
+  printf 'Services : hostapd=%s dnsmasq=%s updrop=%s%s\n' \
     "$(systemctl is-active hostapd 2>/dev/null)" \
     "$(systemctl is-active dnsmasq 2>/dev/null)" \
-    "$(systemctl is-active updrop 2>/dev/null)"
+    "$(systemctl is-active updrop 2>/dev/null)" \
+    "$( share_is_on && printf ' nat=%s' "$(systemctl is-active pi-ap-nat.service 2>/dev/null)" )"
 }
 op_status(){
   if [[ -x /usr/local/bin/pi_ap_healthcheck.sh ]]; then
-    /usr/local/bin/pi_ap_healthcheck.sh "$@"
+    IFACE="$IFACE" SSID="$SSID" AP_IP="$AP_IP" UPLOAD_PORT="$UPLOAD_PORT" UPLOAD_DIR="$UPLOAD_DIR" \
+      /usr/local/bin/pi_ap_healthcheck.sh "$@"
   else
     systemctl status hostapd dnsmasq updrop --no-pager || true
   fi
@@ -166,21 +416,42 @@ op_status(){
 do_setup(){
   echo "[*] Installing packages..."
   apt-get update -y
-  apt-get install -y hostapd dnsmasq iw rfkill
+  apt-get install -y hostapd dnsmasq iw rfkill iptables
 
   echo "[*] Unblocking Wi-Fi radio + setting regulatory domain to ${COUNTRY}..."
   rfkill unblock wlan || true
-  set_regdomain                          # unlocks full TX power for the country
+  set_regdomain
 
-  echo "[*] Removing $IFACE from NetworkManager control..."
+  echo "[*] Hostname '${PI_HOSTNAME}'$( [[ "$ENABLE_MDNS" == "1" ]] && echo " + mDNS (${PI_HOSTNAME}.local)" )..."
+  set_hostname "$PI_HOSTNAME"
+  if [[ "$ENABLE_MDNS" == "1" ]]; then
+    apt-get install -y avahi-daemon
+    cat >/etc/avahi/avahi-daemon.conf <<EOF
+[server]
+host-name=${PI_HOSTNAME}
+allow-interfaces=${IFACE}$( [[ "$ENABLE_ETH" == "1" ]] && echo ",${ETH_IFACE}" )
+use-ipv4=yes
+use-ipv6=yes
+[publish]
+publish-addresses=yes
+publish-hinfo=no
+publish-workstation=no
+EOF
+    systemctl enable avahi-daemon 2>/dev/null || true
+    systemctl restart avahi-daemon 2>/dev/null || true
+  fi
+
+  echo "[*] Removing ${IFACE}$( [[ "$ENABLE_ETH" == "1" ]] && echo "+${ETH_IFACE}" ) from NetworkManager (the uplink NIC stays NM-managed for its own DHCP + default route)..."
+  local unmanaged="interface-name:${IFACE}"
+  [[ "$ENABLE_ETH" == "1" ]] && unmanaged="${unmanaged};interface-name:${ETH_IFACE}"
   install -d /etc/NetworkManager/conf.d
   cat >/etc/NetworkManager/conf.d/99-unmanaged-ap.conf <<EOF
 [keyfile]
-unmanaged-devices=interface-name:${IFACE}
+unmanaged-devices=${unmanaged}
 EOF
   systemctl reload NetworkManager || true
 
-  echo "[*] Static-IP oneshot for $IFACE..."
+  echo "[*] Static-IP oneshot for $IFACE (Wi-Fi)..."
   cat >/etc/systemd/system/ap-ip.service <<EOF
 [Unit]
 Description=Static IP for AP interface ${IFACE}
@@ -198,6 +469,29 @@ ExecStop=/sbin/ip addr flush dev ${IFACE}
 [Install]
 WantedBy=multi-user.target
 EOF
+
+  if [[ "$ENABLE_ETH" == "1" ]]; then
+    echo "[*] Static-IP oneshot for ${ETH_IFACE} (wired workstation)..."
+    cat >/etc/systemd/system/eth-ip.service <<EOF
+[Unit]
+Description=Static IP for wired interface ${ETH_IFACE}
+Wants=network-pre.target
+Before=dnsmasq.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Environment=ETH_MAC=${ETH_MAC}
+ExecStartPre=-/usr/local/bin/pi-ap _macapply ${ETH_IFACE} \${ETH_MAC}
+ExecStart=/sbin/ip link set ${ETH_IFACE} up
+ExecStart=/sbin/ip addr flush dev ${ETH_IFACE}
+ExecStart=/sbin/ip addr add ${ETH_IP}/24 dev ${ETH_IFACE}
+ExecStop=/sbin/ip addr flush dev ${ETH_IFACE}
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  fi
 
   echo "[*] hostapd config (hidden=${HIDDEN})..."
   install -d /etc/hostapd
@@ -241,26 +535,15 @@ Restart=on-failure
 RestartSec=3
 EOF
 
-  echo "[*] dnsmasq config..."
-  [[ -f /etc/dnsmasq.conf && ! -f /etc/dnsmasq.conf.orig ]] && mv /etc/dnsmasq.conf /etc/dnsmasq.conf.orig || true
-  install -d /etc/dnsmasq.d
-  cat >/etc/dnsmasq.d/ap.conf <<EOF
-interface=${IFACE}
-bind-dynamic
-domain-needed
-bogus-priv
-dhcp-range=${DHCP_START},${DHCP_END},${NETMASK},24h
-dhcp-option=3,${AP_IP}
-dhcp-option=6,${AP_IP}
-EOF
+  echo "[*] dnsmasq config (DHCP for Wi-Fi$( [[ "$ENABLE_ETH" == "1" && "$ETH_DHCP" == "1" ]] && echo ' + eth0' ); internet sharing=$( [[ "$SHARE_INTERNET" == "1" ]] && echo on || echo off ))..."
+  write_dnsmasq_conf "$SHARE_INTERNET"
 
   echo "[*] Creating non-root service user '${UPLOAD_USER}'..."
   id -u "$UPLOAD_USER" >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin "$UPLOAD_USER"
   install -d -o "$UPLOAD_USER" -g "$UPLOAD_USER" "$UPLOAD_DIR"
   chown -R "$UPLOAD_USER":"$UPLOAD_USER" "$UPLOAD_DIR"
 
-  echo "[*] Deploying upload server (Go)..."
-  local EXEC=""
+  echo "[*] Deploying upload server (Go, bind ${SERVER_BIND})..."
   if [[ -x "$GO_BIN" ]]; then
     echo "    using prebuilt binary: $GO_BIN"; install -m755 "$GO_BIN" /usr/local/bin/updrop
   elif command -v go >/dev/null 2>&1; then
@@ -271,13 +554,15 @@ EOF
     echo "   cross-compile: GOOS=linux GOARCH=arm64 go build -o updrop $(basename "$GO_SRC")  (drop next to this script)"
     echo "   or: sudo apt install -y golang"; exit 1
   fi
-  EXEC="/usr/local/bin/updrop -port ${UPLOAD_PORT} -dir ${UPLOAD_DIR} -bind ${AP_IP}"
+  local EXEC="/usr/local/bin/updrop -port ${UPLOAD_PORT} -dir ${UPLOAD_DIR} -bind ${SERVER_BIND}"
 
   local cap_line=""; [[ "$UPLOAD_PORT" -lt 1024 ]] && cap_line="AmbientCapabilities=CAP_NET_BIND_SERVICE"
+  local after="network.target ap-ip.service"
+  [[ "$ENABLE_ETH" == "1" ]] && after="${after} eth-ip.service"
   cat >/etc/systemd/system/updrop.service <<EOF
 [Unit]
 Description=updrop file upload server
-After=network.target ap-ip.service
+After=${after}
 
 [Service]
 ExecStart=${EXEC}
@@ -344,17 +629,33 @@ EOF
   systemctl unmask hostapd
   systemctl daemon-reload
   systemctl enable ap-ip.service hostapd dnsmasq updrop.service
-  systemctl restart ap-ip.service      # oneshot: (re)adds the IP
-  reload_hostapd                        # restart-or-start hostapd + verify it came up
+  [[ "$ENABLE_ETH" == "1" ]] && systemctl enable eth-ip.service
+  systemctl restart ap-ip.service
+  [[ "$ENABLE_ETH" == "1" ]] && systemctl restart eth-ip.service
+  reload_hostapd
   systemctl restart dnsmasq updrop.service
   [[ "$monitor_ok" == "1" ]] && systemctl enable --now pi-ap-healthcheck.timer
 
+  if [[ "$SHARE_INTERNET" == "1" ]]; then
+    echo "[*] Internet sharing: enabling NAT (uplink=$(resolve_uplink || echo '?'))..."
+    write_nat_unit
+    write_sysctl_forward 1
+    systemctl daemon-reload
+    systemctl enable --now pi-ap-nat.service || echo "!! NAT service failed to start — check UPLINK_IFACE / uplink default route, then: sudo pi-ap share on"
+  fi
+
   echo
-  echo "[OK] setup complete  (hidden: ${HIDDEN})"
-  echo "     SSID   : ${SSID}   pass: ${PSK}"
-  echo "     Upload : http://${AP_IP}:${UPLOAD_PORT}/upload"
-  echo "     TXpwr  : $(iw dev "$IFACE" info 2>/dev/null | sed -n 's/^[[:space:]]*txpower //p')"
-  echo "     Ops    : sudo pi-ap show | hidden off | ssid NAME | pass PW | status"
+  local psfx=""; [[ "$UPLOAD_PORT" != "80" ]] && psfx=":${UPLOAD_PORT}"
+  echo "[OK] setup complete  (hidden: ${HIDDEN}, bind: ${SERVER_BIND}, internet sharing: $( [[ "$SHARE_INTERNET" == "1" ]] && echo ON || echo OFF ))"
+  [[ "$ENABLE_MDNS" == "1" ]] && echo "     Name   : http://${PI_HOSTNAME}.local${psfx}/    (mDNS on Wi-Fi + eth0)"
+  echo "     Wi-Fi  : SSID ${SSID} / pass ${PSK}  ->  http://${AP_IP}${psfx}/"
+  if [[ "$ENABLE_ETH" == "1" ]]; then
+    echo "     Eth0   : ${ETH_IP}$( [[ "$ETH_DHCP" == "1" ]] && echo " (+DHCP ${ETH_DHCP_START}-${ETH_DHCP_END})" )  ->  http://${ETH_IP}${psfx}/"
+  fi
+  if [[ "$SHARE_INTERNET" == "1" ]]; then
+    echo "     Internet: shared via $(resolve_uplink || echo '?') — clients also resolve http://${PI_HOSTNAME}/ and http://${PI_HOSTNAME}.${LOCAL_DOMAIN}/"
+  fi
+  echo "     Ops    : sudo pi-ap show | status | share on|off | hostname NAME | ethmac random | ssid NAME | hidden off"
 }
 
 # ---- DISPATCH --------------------------------------------------------------
@@ -365,6 +666,12 @@ case "$cmd" in
   pass)    need_root; op_pass   "${1:-}" ;;
   hidden)  need_root; op_hidden "${1:-}" ;;
   channel) need_root; op_channel "${1:-}" ;;
+  hostname) need_root; op_hostname "${1:-}" ;;
+  ethmac)  need_root; op_ethmac "${1:-}" ;;
+  share)   need_root; op_share "${1:-status}" ;;
+  _macapply) need_root; mac_apply "${1:-}" "${2:-}" ;;
+  _natapply) need_root; nat_apply ;;
+  _natclear) need_root; nat_clear ;;
   restart) need_root; op_restart ;;
   show)    need_root; op_show ;;
   status)  op_status "$@" ;;

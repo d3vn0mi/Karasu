@@ -150,7 +150,7 @@ sudo pi-ap share status     # uplink, ip_forward, MASQUERADE present?
 sudo pi-ap share off        # back to isolated (no internet, drop server only)
 ```
 
-`share on` is idempotent and survives reboot (a `pi-ap-nat.service` re-applies the rules). The uplink is auto-detected (the NIC holding the default route); if detection fails, set `UPLINK_IFACE` in the CONFIG block (e.g. `eth1`, `wlan1`, `usb0`) and re-run. After turning it on, clients must **renew their DHCP lease** (reconnect, or unplug/replug the cable) to pick up the gateway + DNS. In share mode the Pi also answers `http://karasu/` and `http://karasu.lan/` over normal DNS — handy when Windows mDNS (`.local`) is flaky.
+`share on` is idempotent and survives reboot (a `pi-ap-nat.service` re-applies the rules). The uplink is auto-detected (the NIC holding the default route); if detection fails, set `UPLINK_IFACE` in the CONFIG block (e.g. `eth1`, `wlan1`, `usb0`) and re-run. After turning it on, clients must **renew their DHCP lease** (reconnect, or unplug/replug the cable) to pick up the gateway + DNS. The Pi answers `http://karasu/` and `http://karasu.lan/` over unicast DNS in **both** modes (see *Reaching it by name*).
 
 **Apply a change made in the CONFIG block.** Re-run setup — it's restart-aware, applies everything, reinstalls the `pi-ap` shortcut, and re-verifies:
 
@@ -229,7 +229,7 @@ sudo nmcli connection up pidrop
 - **macOS:** `networksetup -setairportnetwork en0 karasu yatagarasu` (works for hidden), or Wi-Fi menu → Other…
 - **Windows:** add the network manually and tick *connect even if not broadcasting*.
 
-Clients get a `192.168.50.x` lease and **no internet** — expected, it's an isolated AP.
+Clients get a `192.168.150.x` lease and **no internet** — expected, it's an isolated AP.
 
 ## Reach it by name
 
@@ -241,24 +241,24 @@ http://karasu.local/
 
 No IP, no port. `.local` is resolved by mDNS — built in on macOS (Bonjour) and Windows 10+, and via `avahi` + `libnss-mdns` on Linux. The name is advertised **only on Wi-Fi and `eth0`**, never on an uplink NIC. Rename with `sudo pi-ap hostname <NAME>` (or `PI_HOSTNAME` in the config). Want a port instead? Set `UPLOAD_PORT` and use `http://karasu.local:PORT/`.
 
-**If `.local` won't resolve** (common on Windows with multiple NICs, or where mDNS is filtered) but the IP works: that's an mDNS problem, not a server problem. The reliable fix is to let the Pi serve **unicast DNS** — turn on internet sharing (`sudo pi-ap share on`, see below) and the Pi hands itself out as the DNS server and answers `http://karasu/` and `http://karasu.lan/` directly, no mDNS involved. `localise-queries` returns the Pi's address on the *same subnet* as the asking client (`192.168.60.1` on the wire, `192.168.50.1` on Wi-Fi), so the name always points at the interface the client is actually on.
+**Bare name `http://karasu/` (no `.local`) works too** — the Pi also serves **unicast DNS** for its own name, in isolated mode as well as share mode (`LOCAL_DNS=1`, default). DHCP hands the Pi out as the DNS server (in isolated mode **never** as the gateway), and dnsmasq answers `karasu` / `karasu.lan` and nothing else: with no upstream configured every other query gets `REFUSED`, so a dual-homed laptop (Wi-Fi here, internet elsewhere) falls through to its real resolver. Clients must renew DHCP once to pick up option 6. Set `LOCAL_DNS=0` to hand out no DNS at all in isolated mode (then only the IP or `.local` work). Per-OS: Windows resolves bare `karasu`; macOS/Linux get search domain `lan` via DHCP, so `karasu` → `karasu.lan` (macOS may still prefer `karasu.local` when another NIC holds the default route). `localise-queries` returns the Pi's address on the *same subnet* as the asking client (`192.168.160.1` on the wire, `192.168.150.1` on Wi-Fi), so the name always points at the interface the client is actually on.
 
 ## Wired workstation (dual-homed transfer)
 
 Plug the workstation into the Pi's `eth0` with a direct cable. The server listens on `::` (all interfaces), so once `eth0` has an address the workstation reaches the **same** drop the laptops use — upload from one side, download from the other. No routing between the Wi-Fi and the wire is needed.
 
-`setup` gives `eth0` a static `192.168.60.1` and (with `ETH_DHCP=1`) runs DHCP on it — safe because it's a dedicated cable. By default it hands out **no default gateway or DNS**, so it never disturbs the workstation's real network. (If the workstation should instead get its *internet* from the Pi, see **Uplink & internet sharing** below — `share on` flips the DHCP to hand out the Pi as gateway + DNS.) Three ways to get the workstation on the link:
+`setup` gives `eth0` a static `192.168.160.1` and (with `ETH_DHCP=1`) runs DHCP on it — safe because it's a dedicated cable. By default it hands out **no default gateway or DNS**, so it never disturbs the workstation's real network. (If the workstation should instead get its *internet* from the Pi, see **Uplink & internet sharing** below — `share on` flips the DHCP to hand out the Pi as gateway + DNS.) Three ways to get the workstation on the link:
 
 | Method | Workstation side | Reach the server at |
 |---|---|---|
-| **DHCP (auto)** | leave the adapter on "Obtain IP automatically" (default) | `http://karasu.local/` or `http://192.168.60.1/` |
-| **Static** | set the adapter to `192.168.60.2` / `255.255.255.0`, no gateway | `http://karasu.local/` or `http://192.168.60.1/` |
+| **DHCP (auto)** | leave the adapter on "Obtain IP automatically" (default) | `http://karasu.local/` or `http://192.168.160.1/` |
+| **Static** | set the adapter to `192.168.160.2` / `255.255.255.0`, no gateway | `http://karasu.local/` or `http://192.168.160.1/` |
 | **IPv6 link-local** | nothing — both ends self-assign `fe80::` | `http://[<pi-eth0-fe80>%<zone>]/` |
 
 **Windows, static:**
 
 ```
-netsh interface ip set address name="Ethernet" static 192.168.60.2 255.255.255.0
+netsh interface ip set address name="Ethernet" static 192.168.160.2 255.255.255.0
 ```
 
 (use the adapter name from `netsh interface show interface`).
@@ -291,7 +291,7 @@ Turns the Pi into a router for its clients. This is the setup where the workstat
 - **`net.ipv4.ip_forward=1`** (persisted in `/etc/sysctl.d/99-pi-ap.conf`).
 - **One `iptables` NAT rule** — `MASQUERADE` on the uplink — carries *all* client traffic out: DNS, HTTP, HTTPS, everything. There is **no** per-protocol rule; NAT is L3, so DNS and HTTP ride the same rule. Plus `FORWARD` rules allowing `wlan0`/`eth0 → uplink` and the `RELATED,ESTABLISHED` replies back.
 - **DHCP now hands out the Pi as gateway *and* DNS.** dnsmasq resolves for the clients by forwarding to `UPSTREAM_DNS` (default `1.1.1.1`, `8.8.8.8`) over the Pi's own uplink — so no separate DNS iptables rule is needed either.
-- **Name resolution comes for free:** clients also resolve `http://karasu/` and `http://karasu.lan/` via the Pi over unicast DNS (bypasses flaky Windows `.local`/mDNS).
+- **Name resolution:** clients resolve `http://karasu/` and `http://karasu.lan/` via the Pi over unicast DNS — same as isolated mode, but now other names are forwarded upstream instead of `REFUSED`.
 - Rules are re-applied at every boot by `pi-ap-nat.service`, and `share off` tears all of it back down (including `ip_forward`).
 
 ```bash
@@ -302,7 +302,7 @@ sudo pi-ap share status     # uplink=? ip_forward=? masquerade present?
 
 Uplink is auto-detected as the NIC holding the default route. If you have several, set `UPLINK_IFACE` explicitly. IPv4-only (no IPv6 NAT).
 
-Caveat 1: the Pi uses `192.168.50.0/24` (Wi-Fi) and `192.168.60.0/24` (eth0). If your uplink network overlaps either, change `AP_IP`/`ETH_IP` to a free subnet.
+Caveat 1: the Pi uses `192.168.150.0/24` (Wi-Fi) and `192.168.160.0/24` (eth0). If your uplink network overlaps either, change `AP_IP`/`ETH_IP` to a free subnet.
 Caveat 2: if a host firewall (ufw/nftables) sets the `FORWARD` policy to `DROP` with rules ahead of ours, forwarding can still be blocked — check `sudo iptables -S FORWARD` and make sure the `pi-ap` ACCEPTs aren't shadowed.
 
 ## Monitoring
@@ -329,7 +329,7 @@ Edit the `CONFIG` block at the top of `pi_ap_dropbox_setup.sh` before `setup`:
 | `CHANNEL` | `7` | 2.4 GHz; 1/6/11 are non-overlapping |
 | `HW_MODE` | `g` | `g` = 2.4 GHz, `a` = 5 GHz |
 | `HIDDEN` | `0` | `1` = don't broadcast the SSID |
-| `AP_IP` | `192.168.50.1` | gateway / server address |
+| `AP_IP` | `192.168.150.1` | gateway / server address |
 | `DHCP_START`–`DHCP_END` | `.50`–`.150` | lease pool |
 | `UPLOAD_DIR` | `/srv/updrop` | where uploads are saved |
 | `UPLOAD_PORT` | `80` | server port; **80** = portless (`http://karasu.local`) |
@@ -337,14 +337,15 @@ Edit the `CONFIG` block at the top of `pi_ap_dropbox_setup.sh` before `setup`:
 | `PI_HOSTNAME` | `karasu` | system hostname → reachable as `karasu.local` (mDNS) |
 | `ENABLE_MDNS` | `1` | advertise `<name>.local` via Avahi on `wlan0`+`eth0` only (not the uplink) |
 | `ENABLE_ETH` | `1` | configure `eth0` for a wired workstation |
-| `ETH_IP` | `192.168.60.1` | Pi's fixed address on the wire |
+| `ETH_IP` | `192.168.160.1` | Pi's fixed address on the wire |
 | `ETH_MAC` | `keep` | eth0 MAC before it hits the wire: `keep`, `random`, or a specific `AA:BB:CC:DD:EE:FF` |
 | `ETH_DHCP` | `1` | hand the workstation an IP — **safe only on a direct/dedicated cable** |
 | `ETH_DHCP_START`–`ETH_DHCP_END` | `.50`–`.150` | wired lease pool |
 | `SHARE_INTERNET` | `0` | `1` = NAT clients out to the internet via the uplink (also toggled live with `pi-ap share`) |
 | `UPLINK_IFACE` | `auto` | uplink NIC for sharing; `auto` = the default-route NIC (not `wlan0`/`eth0`), or set `eth1`/`wlan1`/`usb0` |
 | `UPSTREAM_DNS` | `1.1.1.1 8.8.8.8` | resolvers dnsmasq forwards to in share mode (empty = use the Pi's `/etc/resolv.conf`) |
-| `LOCAL_DOMAIN` | `lan` | in share mode, `<PI_HOSTNAME>.<LOCAL_DOMAIN>` also resolves (e.g. `karasu.lan`) |
+| `LOCAL_DOMAIN` | `lan` | `<PI_HOSTNAME>.<LOCAL_DOMAIN>` also resolves (e.g. `karasu.lan`) |
+| `LOCAL_DNS` | `1` | isolated mode still serves `http://<PI_HOSTNAME>/` over unicast DNS (DHCP DNS = Pi, no gateway; other names `REFUSED`). `0` = no DNS handed out in isolated mode |
 | `UPLOAD_USER` | `updrop` | non-root account the server runs as |
 | `ENABLE_MONITOR` | `1` | deploy the health-check timer |
 | `HC_INTERVAL` | `5min` | monitor cadence |
@@ -376,7 +377,7 @@ Edit the `CONFIG` block at the top of `pi_ap_dropbox_setup.sh` before `setup`:
 | `/etc/default/hostapd` | points hostapd at the conf above (`DAEMON_CONF=`) |
 | `/etc/systemd/system/hostapd.service.d/override.conf` | restart-guard drop-in (fixes the boot race) |
 | `/etc/dnsmasq.d/ap.conf` | DHCP ranges for `wlan0` (and `eth0` when enabled); isolated = no gateway/DNS, share = Pi as gateway+DNS |
-| `/etc/dnsmasq-ap-hosts` | *share mode only* — maps `karasu` → the Pi's per-subnet IPs for unicast name resolution (kept **outside** `/etc/dnsmasq.d/`, which is a conf-dir) |
+| `/etc/dnsmasq-ap-hosts` | *share mode, or isolated with `LOCAL_DNS=1`* — maps `karasu` → the Pi's per-subnet IPs for unicast name resolution (kept **outside** `/etc/dnsmasq.d/`, which is a conf-dir) |
 | `/etc/NetworkManager/conf.d/99-unmanaged-ap.conf` | tells NetworkManager to leave `wlan0`/`eth0` alone |
 | `/etc/systemd/system/ap-ip.service` | oneshot: static IP on `wlan0` at boot |
 | `/etc/systemd/system/eth-ip.service` | oneshot: static IP on `eth0` (when `ENABLE_ETH=1`) |
@@ -415,11 +416,12 @@ Also created: a system user `updrop` (nologin) that the server runs as.
 | **Workstation has no internet but should get it from the Pi** | share mode off — DHCP hands out no gateway/DNS | `sudo pi-ap share on`, then renew DHCP on the workstation (`ipconfig /renew` or replug). Confirm with `pi-ap share status` |
 | **`share on` but clients still have no internet** | uplink not detected, forwarding blocked, or Pi itself offline | `pi-ap share status` (uplink set? `ip_forward=1`? masquerade present?); `ping 1.1.1.1` **from the Pi** first; `sudo iptables -S FORWARD` for a shadowing DROP; set `UPLINK_IFACE` if auto-detect picked wrong |
 | **Internet works by IP but names don't resolve (share mode)** | client didn't pick up the Pi as DNS, or upstream DNS unreachable | renew DHCP so option 6 (DNS=Pi) applies; check `UPSTREAM_DNS` is reachable from the Pi; `journalctl -u dnsmasq -e` |
-| **Workstation can't reach the server** | server bound to Wi-Fi only, or `eth0` has no address | `pi-ap show` → `Server bind=::` and an `Eth0 IP`; workstation adapter has a `192.168.60.x` (DHCP) or a static IP |
+| **Workstation can't reach the server** | server bound to Wi-Fi only, or `eth0` has no address | `pi-ap show` → `Server bind=::` and an `Eth0 IP`; workstation adapter has a `192.168.160.x` (DHCP) or a static IP |
 | **IPv6 link-local won't open in a browser** | browsers mangle the `%zone` in URLs | write the zone as `%25<ifindex>` (e.g. `http://[fe80::…%2512]/`), or use `curl`, or just use IPv4 |
-| **`karasu.local` doesn't resolve** (IP works) | client-side mDNS problem (common on Windows w/ multiple NICs), or Avahi down | on the Pi: `systemctl status avahi-daemon`, and confirm `eth0` is in `allow-interfaces` (`/etc/avahi/avahi-daemon.conf`); on Linux clients install `avahi-daemon`+`libnss-mdns`. **Reliable fix:** `sudo pi-ap share on` → the Pi serves the name over unicast DNS; browse `http://karasu/` or `http://karasu.lan/` (no `.local`). Else use the IP |
+| **Bare `http://<name>/` won't resolve, IP works** | Pi still on an old config (pre-v0.11 only served the name in share mode), hostname mismatch, or client hasn't renewed DHCP | redeploy the script and `sudo pi-ap hostname karasu`; on the Pi `cat /etc/dnsmasq-ap-hosts`; on the client `ipconfig /renew` + `nslookup karasu 192.168.150.1` |
+| **`karasu.local` doesn't resolve** (IP works) | client-side mDNS problem (common on Windows w/ multiple NICs), or Avahi down | on the Pi: `systemctl status avahi-daemon`, and confirm `eth0` is in `allow-interfaces` (`/etc/avahi/avahi-daemon.conf`); on Linux clients install `avahi-daemon`+`libnss-mdns`. **Reliable fix:** browse `http://karasu/` or `http://karasu.lan/` (unicast DNS via the Pi, any mode with `LOCAL_DNS=1`) after renewing DHCP. Else use the IP |
 | **Name resolves but page won't load** | server isn't on port 80 | `pi-ap show` → the `Host` line shows the URL; if `UPLOAD_PORT` isn't 80 use `karasu.local:PORT` |
-| **Lost SSH during `setup`** | setup reassigns `wlan0` and `eth0` | run setup from the **console**; reconnect over Wi-Fi (`192.168.50.1`) afterwards |
+| **Lost SSH during `setup`** | setup reassigns `wlan0` and `eth0` | run setup from the **console**; reconnect over Wi-Fi (`192.168.150.1`) afterwards |
 | **Two clients can't see each other** | by design — no routing between Wi-Fi and eth0 | transfer via the drop: one side uploads, the other downloads |
 | **Range still poor at full TX power** | onboard antenna limit | USB adapter with an external antenna (MT7612U / RTL8812AU / AR9271); set `IFACE` accordingly |
 

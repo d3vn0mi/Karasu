@@ -29,6 +29,13 @@
 #           reassigns eth0's IP and will drop an eth0 SSH session.
 #
 #  Changelog:
+#    v0.12 client subnets moved to 192.168.150.0/24 (Wi-Fi) + 192.168.160.0/24 (eth0)
+#          (old .50/.60 nets collided with another network in use)
+#    v0.11 name resolution in ISOLATED mode: DHCP now hands out the Pi as DNS
+#          (never as gateway) and dnsmasq answers ONLY the Pi's own name — no
+#          upstream, everything else REFUSED so dual-homed clients fall through
+#          to their real DNS. http://karasu/ + karasu.lan now work without
+#          'share on' (LOCAL_DNS=1). 'hostname' op re-syncs dnsmasq in both modes.
 #    v0.10 rebrand: product name 'Yatagarasu'; default hostname + SSID 'karasu'
 #          (reach it at http://karasu/ in share mode, http://karasu.local otherwise)
 #    v0.9  internet sharing: SHARE_INTERNET + UPLINK_IFACE, ip_forward + iptables
@@ -57,9 +64,9 @@ CHANNEL="7"                                      # 2.4GHz: 1-13 (1/6/11 non-over
 HW_MODE="g"                                      # g = 2.4GHz (a = 5GHz)
 BSSID=""                                         # optional custom BSSID (empty = adapter default)
 HIDDEN="0"                                        # 1 = hidden, 0 = broadcast
-AP_IP="192.168.50.1"
-DHCP_START="192.168.50.50"
-DHCP_END="192.168.50.150"
+AP_IP="192.168.150.1"
+DHCP_START="192.168.150.50"
+DHCP_END="192.168.150.150"
 NETMASK="255.255.255.0"
 
 # --- hostname / mDNS (reach the Pi by name, no IP or port) ---
@@ -70,16 +77,19 @@ ENABLE_MDNS="1"                                  # advertise <PI_HOSTNAME>.local
 ENABLE_ETH="1"                                   # 1 = configure eth0 for a wired workstation
 ETH_IFACE="eth0"
 ETH_MAC="keep"                                   # eth0 MAC before it hits the wire: keep | random | AA:BB:CC:DD:EE:FF
-ETH_IP="192.168.60.1"                            # Pi's fixed address on the wire
+ETH_IP="192.168.160.1"                            # Pi's fixed address on the wire
 ETH_DHCP="1"                                     # 1 = hand the workstation an IP (SAFE ONLY on a direct/dedicated cable)
-ETH_DHCP_START="192.168.60.50"
-ETH_DHCP_END="192.168.60.150"
+ETH_DHCP_START="192.168.160.50"
+ETH_DHCP_END="192.168.160.150"
 
 # --- internet sharing (route clients OUT to the internet via an uplink NIC) ---
 SHARE_INTERNET="0"                               # 1 = NAT wlan0+eth0 clients out through the uplink; 0 = isolated (no internet, drop server only)
 UPLINK_IFACE="auto"                              # auto = the NIC that holds the default route (not wlan0/eth0); or set e.g. eth1, wlan1, usb0
 UPSTREAM_DNS="1.1.1.1 8.8.8.8"                   # resolvers dnsmasq forwards to in share mode (empty = use the Pi's /etc/resolv.conf)
-LOCAL_DOMAIN="lan"                               # in share mode: <PI_HOSTNAME>.<LOCAL_DOMAIN> also resolves (e.g. karasu.lan)
+LOCAL_DOMAIN="lan"                               # <PI_HOSTNAME>.<LOCAL_DOMAIN> also resolves (e.g. karasu.lan)
+LOCAL_DNS="1"                                    # 1 = isolated mode still serves http://<PI_HOSTNAME>/ over unicast DNS
+                                                 #     (DHCP gives DNS=Pi, NO gateway; only the Pi's name answers, rest REFUSED)
+                                                 # 0 = isolated clients get no DNS at all -> only IP or <name>.local (mDNS)
 
 UPLOAD_DIR="/srv/updrop"
 UPLOAD_PORT="80"                                 # 80 = reach it portless (http://karasu.local); non-root binds it via CAP_NET_BIND_SERVICE
@@ -214,7 +224,8 @@ WantedBy=multi-user.target
 EOF
 }
 write_dnsmasq_conf(){                            # <share:0|1> — regenerate /etc/dnsmasq.d/ap.conf for the current mode
-  local share="${1:-0}"
+  local share="${1:-0}" dns=0
+  [[ "$share" == "1" || "$LOCAL_DNS" == "1" ]] && dns=1   # serve the Pi's name over unicast DNS?
   [[ -f /etc/dnsmasq.conf && ! -f /etc/dnsmasq.conf.orig ]] && mv /etc/dnsmasq.conf /etc/dnsmasq.conf.orig || true
   install -d /etc/dnsmasq.d
   rm -f /etc/dnsmasq.d/ap-hosts    # never inside the conf-dir: dnsmasq parses every file there as config (removes any stale landmine)
@@ -225,22 +236,14 @@ write_dnsmasq_conf(){                            # <share:0|1> — regenerate /e
     echo "domain-needed"
     echo "bogus-priv"
     echo "dhcp-range=set:wlan,${DHCP_START},${DHCP_END},${NETMASK},24h"
-    if [[ "$share" == "1" ]]; then
-      echo "dhcp-option=tag:wlan,3,${AP_IP}"     # gateway = the Pi (Wi-Fi side)
-      echo "dhcp-option=tag:wlan,6,${AP_IP}"     # DNS = the Pi (dnsmasq forwards upstream)
-    else
-      echo "dhcp-option=tag:wlan,3"              # isolated: no default route
-      echo "dhcp-option=tag:wlan,6"              # isolated: no DNS override
-    fi
+    # option 3 (gateway) only when sharing; option 6 (DNS) whenever the Pi serves its own name
+    if [[ "$share" == "1" ]]; then echo "dhcp-option=tag:wlan,3,${AP_IP}"; else echo "dhcp-option=tag:wlan,3"; fi
+    if [[ "$dns"   == "1" ]]; then echo "dhcp-option=tag:wlan,6,${AP_IP}"; else echo "dhcp-option=tag:wlan,6"; fi
     if [[ "$ENABLE_ETH" == "1" && "$ETH_DHCP" == "1" ]]; then
       echo "dhcp-range=set:eth,${ETH_DHCP_START},${ETH_DHCP_END},${NETMASK},24h"
-      if [[ "$share" == "1" ]]; then
-        echo "dhcp-option=tag:eth,3,${ETH_IP}"   # gateway = the Pi (wired side)
-        echo "dhcp-option=tag:eth,6,${ETH_IP}"   # DNS = the Pi
-      else
-        echo "dhcp-option=tag:eth,3"             # isolated: protect the workstation's own default route
-        echo "dhcp-option=tag:eth,6"             # isolated: no DNS override
-      fi
+      # isolated: never a gateway on the wire -> the workstation keeps its own default route
+      if [[ "$share" == "1" ]]; then echo "dhcp-option=tag:eth,3,${ETH_IP}"; else echo "dhcp-option=tag:eth,3"; fi
+      if [[ "$dns"   == "1" ]]; then echo "dhcp-option=tag:eth,6,${ETH_IP}"; else echo "dhcp-option=tag:eth,6"; fi
     fi
     if [[ "$share" == "1" ]]; then
       # deterministic upstream resolvers (ignore the host resolv.conf -> no 127.0.0.53 loop)
@@ -248,17 +251,24 @@ write_dnsmasq_conf(){                            # <share:0|1> — regenerate /e
         echo "no-resolv"
         local s; for s in $UPSTREAM_DNS; do echo "server=${s}"; done
       fi
+    elif [[ "$dns" == "1" ]]; then
+      # isolated: NO upstream. dnsmasq answers only the Pi's own name; anything else gets REFUSED,
+      # so a dual-homed client (Wi-Fi here + internet elsewhere) falls through to its real resolver.
+      echo "no-resolv"
+    fi
+    if [[ "$dns" == "1" ]]; then
       # resolve the Pi by name over unicast DNS (reliable where Windows .local/mDNS is flaky).
       # localise-queries returns the Pi address on the SAME subnet as the asking client.
       echo "no-hosts"
       echo "addn-hosts=/etc/dnsmasq-ap-hosts"    # OUTSIDE /etc/dnsmasq.d (that dir is a conf-dir; a hosts file there fails to parse)
       echo "expand-hosts"
-      echo "domain=${LOCAL_DOMAIN}"
+      echo "domain=${LOCAL_DOMAIN}"              # also DHCP option 15 -> clients search-suffix bare 'karasu' to karasu.lan
+      echo "local=/${LOCAL_DOMAIN}/"             # never forward the local domain upstream
       echo "localise-queries"
     fi
   } >/etc/dnsmasq.d/ap.conf
 
-  if [[ "$share" == "1" ]]; then
+  if [[ "$dns" == "1" ]]; then
     {
       echo "${AP_IP} ${PI_HOSTNAME}"
       [[ "$ENABLE_ETH" == "1" ]] && echo "${ETH_IP} ${PI_HOSTNAME}"
@@ -267,6 +277,7 @@ write_dnsmasq_conf(){                            # <share:0|1> — regenerate /e
     rm -f /etc/dnsmasq-ap-hosts
   fi
 }
+names_on(){ share_is_on || [[ "$LOCAL_DNS" == "1" ]]; }   # is http://<name>/ served over unicast DNS right now?
 
 usage(){ sed -n '4,30p' "${BASH_SOURCE[0]}" | sed 's/^#\{1,\} \{0,1\}//'; }
 
@@ -310,9 +321,12 @@ op_hostname(){                                   # set the Pi hostname -> <name>
     sed -i "s/^host-name=.*/host-name=$h/" /etc/avahi/avahi-daemon.conf
     systemctl restart avahi-daemon 2>/dev/null || true
   fi
-  # keep the unicast-DNS name in sync if sharing is on
-  if share_is_on; then write_dnsmasq_conf 1; systemctl restart dnsmasq 2>/dev/null || true; fi
-  echo "[OK] hostname = $h  ->  http://$h.local$( share_is_on && echo "  (or http://$h / http://$h.${LOCAL_DOMAIN} via DHCP-DNS)" )"
+  # keep the unicast-DNS name in sync (share mode, or isolated with LOCAL_DNS=1)
+  PI_HOSTNAME="$h"
+  if [[ -f /etc/dnsmasq.d/ap.conf ]]; then
+    write_dnsmasq_conf "$( share_is_on && echo 1 || echo 0 )"; systemctl restart dnsmasq 2>/dev/null || true
+  fi
+  echo "[OK] hostname = $h  ->  http://$h.local$( names_on && echo "  (or http://$h / http://$h.${LOCAL_DOMAIN} via DHCP-DNS)" )"
 }
 op_ethmac(){                                     # set eth0 MAC now + persist for next boot
   local mode="${1:-}"
@@ -352,7 +366,7 @@ op_share(){                                      # on|off|status — share the P
       nat_clear
       write_sysctl_forward 0
       write_dnsmasq_conf 0; systemctl restart dnsmasq 2>/dev/null || true
-      echo "[OK] internet sharing OFF (isolated) — clients renew DHCP to drop the gateway/DNS"
+      echo "[OK] internet sharing OFF (isolated) — clients renew DHCP to drop the gateway$( [[ "$LOCAL_DNS" == "1" ]] && echo " (name http://${PI_HOSTNAME}/ still resolves via the Pi)" || echo "/DNS" )"
       ;;
     status|show)
       if share_is_on; then
@@ -395,6 +409,11 @@ op_show(){
     printf 'Internet : shared via %s (NAT)  ->  clients get gateway+DNS = the Pi\n' "$(resolve_uplink || echo '?')"
   else
     printf 'Internet : isolated (clients get the drop server only; run: sudo pi-ap share on)\n'
+  fi
+  if names_on; then
+    printf 'Name DNS : http://%s/  http://%s.%s/   (unicast, DHCP DNS = the Pi)\n' "$(hostname 2>/dev/null)" "$(hostname 2>/dev/null)" "$LOCAL_DOMAIN"
+  else
+    printf 'Name DNS : off (LOCAL_DNS=0, isolated) — use the IP or .local\n'
   fi
   printf 'Server   : bind=%s port=%s dir=%s\n' "${bind:-?}" "$UPLOAD_PORT" "$UPLOAD_DIR"
   printf 'Services : hostapd=%s dnsmasq=%s updrop=%s%s\n' \
@@ -652,8 +671,11 @@ EOF
   if [[ "$ENABLE_ETH" == "1" ]]; then
     echo "     Eth0   : ${ETH_IP}$( [[ "$ETH_DHCP" == "1" ]] && echo " (+DHCP ${ETH_DHCP_START}-${ETH_DHCP_END})" )  ->  http://${ETH_IP}${psfx}/"
   fi
+  if [[ "$SHARE_INTERNET" == "1" || "$LOCAL_DNS" == "1" ]]; then
+    echo "     Name   : http://${PI_HOSTNAME}${psfx}/  or  http://${PI_HOSTNAME}.${LOCAL_DOMAIN}${psfx}/   (unicast DNS via the Pi)"
+  fi
   if [[ "$SHARE_INTERNET" == "1" ]]; then
-    echo "     Internet: shared via $(resolve_uplink || echo '?') — clients also resolve http://${PI_HOSTNAME}/ and http://${PI_HOSTNAME}.${LOCAL_DOMAIN}/"
+    echo "     Internet: shared via $(resolve_uplink || echo '?')"
   fi
   echo "     Ops    : sudo pi-ap show | status | share on|off | hostname NAME | ethmac random | ssid NAME | hidden off"
 }

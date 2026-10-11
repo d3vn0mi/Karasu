@@ -18,14 +18,15 @@
 #           AP_IP=10.42.0.1 UPLOAD_PORT=9000 sudo bash pi_ap_healthcheck.sh
 #
 #  Changelog:
-#    initial release
+#    v0.2  default AP_IP -> 192.168.150.1 (new Wi-Fi subnet)
+#    v0.1  initial release
 # =============================================================================
 set -u
 
 ### ---- CONFIG (env-overridable) ---------------------------------------------
 IFACE="${IFACE:-wlan0}"
 SSID="${SSID:-karasu}"
-AP_IP="${AP_IP:-192.168.50.1}"
+AP_IP="${AP_IP:-192.168.150.1}"
 UPLOAD_PORT="${UPLOAD_PORT:-8000}"
 UPLOAD_DIR="${UPLOAD_DIR:-/srv/updrop}"
 read -r -a SERVICES <<< "${SERVICES:-hostapd dnsmasq updrop ap-ip}"

@@ -1,0 +1,419 @@
+<title>Yatagarasu Topology</title>
+<style>
+  /* Layout: single column, sticky header with a 4-way view switch (AP / Bridge /
+     Intercept / Compare). Each mode is a theme-aware SVG topology + traffic flows;
+     Compare is the 3-way table + constants + rules. Palette = "field console":
+     cool paper / ink, crow-crimson brand accent, five fixed signal colors. */
+  :root{
+    --bg:#e9ecf0; --surface:#ffffff; --surface-2:#f1f4f8; --fg:#14171d;
+    --muted:#55606f; --line:#d0d6df; --chip:#e2e7ee; --accent:#b5283a;
+    --pass:#15a35b; --drop:#2f74e0; --net:#e08a16; --oob:#9b45e0; --block:#e23b3b;
+    --font-display:"Chakra Petch","Bahnschrift",system-ui,sans-serif;
+    --font-body:"IBM Plex Sans",system-ui,-apple-system,sans-serif;
+    --font-mono:"IBM Plex Mono",ui-monospace,"SFMono-Regular",monospace;
+  }
+  @media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+    --bg:#0d0f14; --surface:#161a22; --surface-2:#1c222c; --fg:#e6eaf1;
+    --muted:#8a94a6; --line:#2a303c; --chip:#1f2630; --accent:#ec5361;
+    --pass:#2dd480; --drop:#5b9bff; --net:#f3a73b; --oob:#bd77f5; --block:#f05a5a;
+    color-scheme:dark;
+  }}
+  :root[data-theme="dark"]{
+    --bg:#0d0f14; --surface:#161a22; --surface-2:#1c222c; --fg:#e6eaf1;
+    --muted:#8a94a6; --line:#2a303c; --chip:#1f2630; --accent:#ec5361;
+    --pass:#2dd480; --drop:#5b9bff; --net:#f3a73b; --oob:#bd77f5; --block:#f05a5a;
+    color-scheme:dark;
+  }
+
+  *{box-sizing:border-box}
+  body{background:var(--bg);color:var(--fg);font-family:var(--font-body);
+    line-height:1.5;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:1000px;margin:0 auto;padding-inline:16px;padding-block:0 56px}
+
+  header.bar{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;
+    background:color-mix(in srgb,var(--bg) 88%,transparent);
+    backdrop-filter:blur(10px);border-bottom:1px solid var(--line)}
+  .bar-in{max-width:1000px;margin:0 auto;padding:12px 16px;
+    display:flex;flex-wrap:wrap;gap:10px 16px;align-items:center;justify-content:space-between}
+  .brand{display:flex;align-items:baseline;gap:10px;min-width:0}
+  .brand b{font-family:var(--font-display);font-weight:700;font-size:1.25rem;letter-spacing:.02em}
+  .brand .crow{color:var(--accent)}
+  .brand span{color:var(--muted);font-size:.82rem;font-family:var(--font-mono)}
+  .toggle{display:inline-flex;flex-wrap:wrap;background:var(--surface-2);border:1px solid var(--line);
+    border-radius:10px;padding:3px;gap:3px}
+  .toggle button{font-family:var(--font-display);font-weight:600;font-size:.82rem;
+    letter-spacing:.02em;border:0;cursor:pointer;padding:7px 12px;border-radius:7px;
+    background:transparent;color:var(--muted);white-space:nowrap}
+  .toggle button[aria-pressed="true"]{background:var(--accent);color:#fff}
+  .toggle button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
+  h1{font-family:var(--font-display);font-weight:700;font-size:clamp(1.5rem,4vw,2.1rem);
+    line-height:1.1;text-wrap:balance;margin:28px 0 8px}
+  .lede{color:var(--muted);max-width:68ch;margin:0}
+
+  section{margin-top:26px}
+  .eyebrow{font-family:var(--font-mono);font-size:.72rem;letter-spacing:.14em;
+    text-transform:uppercase;color:var(--muted);margin:0 0 10px}
+  h2{font-family:var(--font-display);font-weight:700;font-size:1.25rem;margin:0 0 4px}
+
+  .card{background:var(--surface);border:1px solid var(--line);border-radius:14px;
+    padding:16px;overflow:hidden}
+  .diagram-cap{display:flex;flex-wrap:wrap;gap:4px 14px;align-items:baseline;margin:0 2px 14px}
+  .diagram-cap h2{font-size:1.1rem}
+  .diagram-cap .tag{font-family:var(--font-mono);font-size:.72rem;padding:2px 8px;border-radius:999px;
+    border:1px solid var(--line);color:var(--muted)}
+  .diagram-cap p{margin:0;color:var(--muted);font-size:.9rem;flex-basis:100%}
+  .svg-scroll{overflow-x:auto}
+  svg.topo{display:block;width:100%;min-width:620px;height:auto}
+
+  .n-box{fill:var(--surface-2);stroke:var(--line);stroke-width:1.5}
+  .n-pi{fill:color-mix(in srgb,var(--accent) 7%,var(--surface));stroke:var(--accent);stroke-width:1.5}
+  .n-sub{fill:var(--chip);stroke:var(--line);stroke-width:1}
+  .n-cloud{fill:var(--surface-2);stroke:var(--line);stroke-width:1.5}
+  .t{fill:var(--fg);font-family:var(--font-display);font-weight:600;font-size:14px}
+  .t-s{fill:var(--muted);font-family:var(--font-mono);font-size:11px}
+  .t-pi{fill:var(--accent);font-family:var(--font-display);font-weight:700;font-size:13px;
+    letter-spacing:.04em;text-transform:uppercase}
+  .t-c{fill:var(--fg);font-family:var(--font-body);font-size:12px}
+  .flow{fill:none;stroke-width:3;stroke-linecap:round}
+  .f-pass{stroke:var(--pass)} .f-drop{stroke:var(--drop)} .f-net{stroke:var(--net)}
+  .f-oob{stroke:var(--oob)} .f-block{stroke:var(--block);stroke-width:2.5;stroke-dasharray:6 5}
+  .flab{font-family:var(--font-mono);font-size:10.5px;fill:var(--fg)}
+  .badge-off{fill:color-mix(in srgb,var(--block) 14%,var(--surface));stroke:var(--block);stroke-width:1.2}
+  .badge-vis{fill:color-mix(in srgb,var(--net) 16%,var(--surface));stroke:var(--net);stroke-width:1.2}
+
+  .flows{list-style:none;margin:14px 0 0;padding:0;display:grid;gap:9px}
+  .flows li{display:flex;gap:11px;align-items:flex-start;font-size:.92rem}
+  .dot{flex:none;width:13px;height:13px;border-radius:3px;margin-top:4px}
+  .flows code,.panel code,.tbl code,.rules code{font-family:var(--font-mono);font-size:.82em;
+    background:var(--surface-2);padding:1px 5px;border-radius:5px}
+  .flows code{white-space:nowrap}
+
+  .legend{display:flex;flex-wrap:wrap;gap:10px 16px;margin:14px 2px 0}
+  .legend span{display:inline-flex;align-items:center;gap:7px;font-size:.8rem;color:var(--muted)}
+  .legend i{width:16px;height:4px;border-radius:2px;display:inline-block}
+
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  @media (max-width:680px){.grid2{grid-template-columns:1fr}}
+  .panel h3{font-family:var(--font-display);margin:0 0 10px;font-size:1.02rem;display:flex;align-items:center;gap:8px}
+  .panel.stay h3::before{content:"";width:10px;height:10px;border-radius:50%;background:var(--pass)}
+  .panel ul{margin:0;padding:0;list-style:none;display:grid;gap:9px}
+  .panel li{font-size:.9rem;padding-left:16px;position:relative}
+  .panel li::before{content:"";position:absolute;left:0;top:9px;width:6px;height:6px;border-radius:50%;background:var(--muted)}
+
+  .tbl-scroll{overflow-x:auto;border:1px solid var(--line);border-radius:14px;background:var(--surface)}
+  table{border-collapse:collapse;width:100%;min-width:680px;font-size:.88rem}
+  th,td{text-align:left;padding:11px 13px;border-bottom:1px solid var(--line);vertical-align:top}
+  thead th{font-family:var(--font-display);font-size:.84rem;position:sticky;top:0;background:var(--surface-2)}
+  thead th .k{display:block;font-family:var(--font-mono);font-size:.68rem;font-weight:400;color:var(--muted)}
+  tbody th{font-weight:600;font-family:var(--font-body)}
+  td{color:var(--muted)}
+  tr:last-child td,tr:last-child th{border-bottom:0}
+  th.c-ap{color:var(--drop)} th.c-br{color:var(--pass)} th.c-ic{color:var(--net)}
+
+  .rules{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  @media (max-width:680px){.rules{grid-template-columns:1fr}}
+  .rule{background:var(--surface);border:1px solid var(--line);border-left:3px solid var(--block);
+    border-radius:10px;padding:12px 14px}
+  .rule.ok{border-left-color:var(--pass)}
+  .rule h4{margin:0 0 4px;font-family:var(--font-display);font-size:.95rem}
+  .rule p{margin:0;font-size:.86rem;color:var(--muted)}
+  .rule p b{color:var(--fg);font-weight:600}
+
+  footer{margin-top:40px;padding-top:18px;border-top:1px solid var(--line);
+    color:var(--muted);font-size:.8rem;font-family:var(--font-mono)}
+</style>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+
+<header class="bar">
+  <div class="bar-in">
+    <div class="brand"><b>Yata<span class="crow">garasu</span></b><span>host: karasu</span></div>
+    <div class="toggle" role="group" aria-label="View">
+      <button id="btn-ap" aria-pressed="false" onclick="setView('ap')">AP</button>
+      <button id="btn-br" aria-pressed="false" onclick="setView('br')">Bridge</button>
+      <button id="btn-ic" aria-pressed="false" onclick="setView('ic')">Intercept</button>
+      <button id="btn-cmp" aria-pressed="true" onclick="setView('cmp')">Compare</button>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+  <h1 id="pgtitle">Three wired roles, one box</h1>
+  <p class="lede" id="pglede">One portable Raspberry Pi — a Wi-Fi AP, a wired drop, and the
+    <code style="font-family:var(--font-mono)">updrop</code> file server — in three mutually-exclusive
+    wired modes. The Wi-Fi + drop stay constant; only the wired role changes. Pick a mode, or compare all three.</p>
+
+  <!-- ============================= AP VIEW ============================= -->
+  <section class="view" id="view-ap" hidden>
+    <div class="card">
+      <div class="diagram-cap">
+        <h2>AP mode</h2><span class="tag">pi_ap_dropbox_setup.sh</span>
+        <p>The Pi <em>is</em> the network: clients connect to it, it hands out addressing and serves the drop. Isolated by default; optional NAT to an uplink.</p>
+      </div>
+      <div class="svg-scroll">
+        <svg class="topo" viewBox="0 0 820 440" role="img" aria-label="AP mode: laptops over Wi-Fi and a workstation on a direct cable connect to the Pi; the Pi optionally NATs to an uplink.">
+          <defs>
+            <marker id="ap-drop" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="var(--drop)"/></marker>
+            <marker id="ap-net" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="var(--net)"/></marker>
+          </defs>
+          <rect class="n-box" x="22" y="58" width="150" height="66" rx="10"/>
+          <text class="t" x="97" y="88" text-anchor="middle">Laptops )))</text>
+          <text class="t-s" x="97" y="106" text-anchor="middle">Wi-Fi clients</text>
+          <rect class="n-box" x="22" y="300" width="150" height="66" rx="10"/>
+          <text class="t" x="97" y="330" text-anchor="middle">Workstation</text>
+          <text class="t-s" x="97" y="348" text-anchor="middle">direct cable</text>
+          <rect class="n-pi" x="250" y="26" width="322" height="388" rx="14"/>
+          <text class="t-pi" x="266" y="50">Raspberry Pi · karasu</text>
+          <rect class="n-sub" x="266" y="68" width="166" height="52" rx="8"/>
+          <text class="t" x="276" y="90">wlan0 · AP</text>
+          <text class="t-s" x="276" y="108">192.168.150.1/24 · SSID karasu</text>
+          <rect class="n-sub" x="266" y="300" width="166" height="52" rx="8"/>
+          <text class="t" x="276" y="322">eth0</text>
+          <text class="t-s" x="276" y="340">192.168.160.1/24 · DHCP</text>
+          <rect class="n-sub" x="440" y="68" width="120" height="52" rx="8"/>
+          <text class="t" x="450" y="90">uplink</text>
+          <text class="t-s" x="450" y="108">default route</text>
+          <rect class="n-box" x="266" y="150" width="294" height="124" rx="10"/>
+          <text class="t" x="283" y="176">Services (common)</text>
+          <text class="t-c" x="283" y="200">updrop — binds :: (:80), the drop</text>
+          <text class="t-c" x="283" y="222">Avahi — karasu.local (mDNS)</text>
+          <text class="t-c" x="283" y="244">hostapd + dnsmasq — AP &amp; DHCP/DNS</text>
+          <text class="t-s" x="283" y="264">isolated: drop only · shared: + NAT</text>
+          <rect class="n-cloud" x="636" y="58" width="160" height="66" rx="22"/>
+          <text class="t" x="716" y="90" text-anchor="middle">Internet</text>
+          <text class="t-s" x="716" y="108" text-anchor="middle">shared mode only</text>
+          <path class="flow f-drop" d="M172 91 H266" marker-end="url(#ap-drop)"/>
+          <path class="flow f-drop" d="M172 326 H266" marker-end="url(#ap-drop)"/>
+          <text class="flab" x="198" y="82">reach drop</text>
+          <path class="flow f-net" d="M560 94 H636" marker-end="url(#ap-net)" stroke-dasharray="7 5"/>
+          <text class="flab" x="573" y="140">NAT (shared)</text>
+        </svg>
+      </div>
+      <div class="legend">
+        <span><i style="background:var(--drop)"></i> drop / updrop</span>
+        <span><i style="background:var(--net)"></i> internet / NAT</span>
+      </div>
+      <ul class="flows">
+        <li><span class="dot" style="background:var(--drop)"></span><div><b>Clients → drop.</b> Laptops on Wi-Fi (<code>wlan0</code>) and a workstation on a direct cable (<code>eth0</code>) reach <code>updrop</code> at <code>karasu</code> / <code>.local</code> / IP. Isolated mode stops here — no gateway, no internet.</div></li>
+        <li><span class="dot" style="background:var(--net)"></span><div><b>Clients → internet (shared only).</b> <code>share on</code> makes the Pi the gateway+DNS and NATs one <code>MASQUERADE</code> out the uplink.</div></li>
+      </ul>
+    </div>
+  </section>
+
+  <!-- ============================= BRIDGE VIEW ============================= -->
+  <section class="view" id="view-br" hidden>
+    <div class="card">
+      <div class="diagram-cap">
+        <h2>Bridge mode</h2><span class="tag">pi_bridge_setup.sh</span>
+        <p>Transparent bump-in-the-wire. Forwards the server's frames verbatim and stays <em>mute</em> to the router — the Pi is invisible. Pure L2, no interception.</p>
+      </div>
+      <div class="svg-scroll">
+        <svg class="topo" viewBox="0 0 820 470" role="img" aria-label="Bridge mode: the Pi is a transparent L2 bridge between a server on eth0 and a router on usb0; it forwards verbatim, stays mute toward the router, and serves the drop only to the server side.">
+          <defs>
+            <marker id="br-pass" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="var(--pass)"/></marker>
+            <marker id="br-drop" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="var(--drop)"/></marker>
+            <marker id="br-net" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="var(--net)"/></marker>
+          </defs>
+          <rect class="n-box" x="20" y="98" width="150" height="66" rx="10"/>
+          <text class="t" x="95" y="128" text-anchor="middle">Server</text>
+          <text class="t-s" x="95" y="146" text-anchor="middle">own MAC + IP</text>
+          <rect class="n-box" x="650" y="98" width="150" height="66" rx="10"/>
+          <text class="t" x="725" y="128" text-anchor="middle">Router</text>
+          <text class="t-s" x="725" y="146" text-anchor="middle">sees only server</text>
+          <rect class="n-pi" x="200" y="26" width="420" height="300" rx="14"/>
+          <text class="t-pi" x="216" y="50">Raspberry Pi · karasu — bridge</text>
+          <rect class="badge-off" x="398" y="36" width="206" height="26" rx="13"/>
+          <text class="t-s" x="501" y="53" text-anchor="middle" style="fill:var(--block)">no uplink — OFFLINE by design</text>
+          <rect class="n-box" x="216" y="104" width="388" height="58" rx="10"/>
+          <text class="t-s" x="410" y="124" text-anchor="middle">br0 · STP off · IPv6 off · members carry NO IP</text>
+          <rect class="n-sub" x="232" y="128" width="150" height="26" rx="6"/>
+          <text class="t-s" x="307" y="146" text-anchor="middle">eth0 (server)</text>
+          <rect class="n-sub" x="438" y="128" width="150" height="26" rx="6"/>
+          <text class="t-s" x="513" y="146" text-anchor="middle">usb0 (router)</text>
+          <rect class="n-box" x="232" y="184" width="356" height="56" rx="10"/>
+          <text class="t" x="248" y="206">updrop :: (:80) · Avahi karasu.local</text>
+          <text class="t-s" x="248" y="226">KARASU_IP — hidden on br0, server side only</text>
+          <rect class="n-box" x="200" y="356" width="420" height="58" rx="12" style="stroke:var(--oob)"/>
+          <text class="t" x="216" y="380" style="fill:var(--oob)">wlan0 · AP — out-of-band mgmt + loot</text>
+          <text class="t-s" x="216" y="400">unchanged — your way in while bridged</text>
+          <rect class="n-cloud" x="650" y="246" width="150" height="62" rx="20"/>
+          <text class="t" x="725" y="276" text-anchor="middle">Internet</text>
+          <text class="t-s" x="725" y="294" text-anchor="middle">via the router</text>
+          <path class="flow f-pass" d="M170 131 H650" marker-start="url(#br-pass)" marker-end="url(#br-pass)"/>
+          <text class="flab" x="316" y="96" style="fill:var(--pass)">transparent L2 passthrough — server frames verbatim</text>
+          <path class="flow f-drop" d="M307 162 V184" marker-end="url(#br-drop)"/>
+          <text class="flab" x="315" y="178">drop</text>
+          <path class="flow f-net" d="M725 164 V246" marker-end="url(#br-net)"/>
+          <path class="flow f-block" d="M560 184 C600 184 610 172 610 150"/>
+          <circle cx="610" cy="150" r="11" fill="none" stroke="var(--block)" stroke-width="2.5"/>
+          <path d="M602 158 L618 142" stroke="var(--block)" stroke-width="2.5"/>
+          <text class="flab" x="470" y="262" style="fill:var(--block)">Pi emits nothing on usb0 (ebtables -o usb0 DROP)</text>
+        </svg>
+      </div>
+      <div class="legend">
+        <span><i style="background:var(--pass)"></i> L2 passthrough</span>
+        <span><i style="background:var(--drop)"></i> drop</span>
+        <span><i style="background:var(--net)"></i> internet</span>
+        <span><i style="background:var(--oob)"></i> out-of-band</span>
+        <span><i style="background:var(--block)"></i> muted</span>
+      </div>
+      <ul class="flows">
+        <li><span class="dot" style="background:var(--pass)"></span><div><b>Server ⇄ router (verbatim).</b> Frames cross <code>eth0→br0→usb0</code> unchanged — the router sees the server's own MAC+IP, like an unplug/replug.</div></li>
+        <li><span class="dot" style="background:var(--drop)"></span><div><b>Server → drop (local).</b> Only the server side reaches <code>updrop</code> at <code>karasu.local</code> / <code>KARASU_IP</code>, fenced off the router port.</div></li>
+        <li><span class="dot" style="background:var(--block)"></span><div><b>Pi → router = dropped.</b> <code>ebtables OUTPUT -o usb0 DROP</code> silences every Pi-origin frame. The Pi has no identity on the router side and no internet of its own.</div></li>
+        <li><span class="dot" style="background:var(--oob)"></span><div><b>You → Pi (out-of-band).</b> Manage over <code>wlan0</code>, console, or a mgmt NIC — never the bridged wire.</div></li>
+      </ul>
+    </div>
+  </section>
+
+  <!-- ============================= INTERCEPT VIEW ============================= -->
+  <section class="view" id="view-ic" hidden>
+    <div class="card">
+      <div class="diagram-cap">
+        <h2>Intercept mode</h2><span class="tag">pi_intercept_setup.sh</span>
+        <p>Inline <em>active MITM</em>. A visible L3 host: <code>br0</code> takes a corporate IP, and the workstation's web traffic is redirected into mitmproxy to rewrite one URL. AP + a mgmt cable stay for the ops laptop.</p>
+      </div>
+      <div class="svg-scroll">
+        <svg class="topo" viewBox="0 0 820 470" role="img" aria-label="Intercept mode: the Pi bridges the workstation to the corporate switch but takes a corporate IP and redirects the workstation's HTTP/HTTPS into a local mitmproxy that rewrites one URL; wlan0 AP and a mgmt cable serve the ops laptop.">
+          <defs>
+            <marker id="ic-pass" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="var(--pass)"/></marker>
+            <marker id="ic-redir" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="var(--drop)"/></marker>
+            <marker id="ic-net" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="var(--net)"/></marker>
+          </defs>
+          <rect class="n-box" x="20" y="98" width="150" height="66" rx="10"/>
+          <text class="t" x="95" y="128" text-anchor="middle">Workstation</text>
+          <text class="t-s" x="95" y="146" text-anchor="middle">own corp IP</text>
+          <rect class="n-box" x="650" y="98" width="150" height="66" rx="10"/>
+          <text class="t" x="725" y="128" text-anchor="middle">Corp switch</text>
+          <text class="t-s" x="725" y="146" text-anchor="middle">→ internet</text>
+          <rect class="n-pi" x="200" y="26" width="420" height="300" rx="14"/>
+          <text class="t-pi" x="216" y="50">Raspberry Pi · karasu — intercept</text>
+          <rect class="badge-vis" x="372" y="36" width="232" height="26" rx="13"/>
+          <text class="t-s" x="488" y="53" text-anchor="middle" style="fill:var(--net)">visible host · HTTPS needs CA on target</text>
+          <rect class="n-box" x="216" y="104" width="388" height="52" rx="10"/>
+          <text class="t-s" x="410" y="123" text-anchor="middle">br0 · corporate IP (DHCP) · br_netfilter + ip_forward ON</text>
+          <rect class="n-sub" x="232" y="130" width="150" height="24" rx="6"/>
+          <text class="t-s" x="307" y="147" text-anchor="middle">eth0 (workstation)</text>
+          <rect class="n-sub" x="438" y="130" width="150" height="24" rx="6"/>
+          <text class="t-s" x="513" y="147" text-anchor="middle">usb0 (corp switch)</text>
+          <rect class="n-box" x="232" y="182" width="356" height="54" rx="10"/>
+          <text class="t" x="248" y="204">mitmproxy :8080</text>
+          <text class="t-s" x="248" y="223">rewrites TARGET_HOST + PATH (addon)</text>
+          <text class="flab" x="232" y="262" style="fill:var(--block)">QUIC UDP/443 dropped · IPv6 not intercepted</text>
+          <rect class="n-box" x="200" y="356" width="204" height="58" rx="12" style="stroke:var(--oob)"/>
+          <text class="t" x="216" y="380" style="fill:var(--oob)">wlan0 · AP</text>
+          <text class="t-s" x="216" y="400">mgmt + updrop drop</text>
+          <rect class="n-box" x="416" y="356" width="204" height="58" rx="12" style="stroke:var(--oob)"/>
+          <text class="t" x="432" y="380" style="fill:var(--oob)">mgmt cable · eth2</text>
+          <text class="t-s" x="432" y="400">10.73.0.1 — ops laptop</text>
+          <rect class="n-cloud" x="650" y="250" width="150" height="60" rx="20"/>
+          <text class="t" x="725" y="280" text-anchor="middle">Internet</text>
+          <path class="flow f-pass" d="M170 131 H650" marker-start="url(#ic-pass)" marker-end="url(#ic-pass)"/>
+          <text class="flab" x="300" y="96" style="fill:var(--pass)">ordinary frames — workstation's own source IP</text>
+          <path class="flow f-drop" d="M307 156 V182" marker-end="url(#ic-redir)"/>
+          <text class="flab" x="314" y="174">:80/:443 REDIRECT</text>
+          <path class="flow f-net" d="M520 182 V156" marker-end="url(#ic-net)"/>
+          <text class="flab" x="470" y="176" style="fill:var(--net)">proxy out (Pi IP)</text>
+          <path class="flow f-net" d="M725 164 V250" marker-end="url(#ic-net)"/>
+        </svg>
+      </div>
+      <div class="legend">
+        <span><i style="background:var(--pass)"></i> ordinary passthrough</span>
+        <span><i style="background:var(--drop)"></i> redirect → proxy</span>
+        <span><i style="background:var(--net)"></i> proxy out / internet</span>
+        <span><i style="background:var(--oob)"></i> mgmt (AP + cable)</span>
+        <span><i style="background:var(--block)"></i> dropped (QUIC)</span>
+      </div>
+      <ul class="flows">
+        <li><span class="dot" style="background:var(--pass)"></span><div><b>Ordinary traffic.</b> Workstation ⇄ corp switch bridges normally, keeping the workstation's own corporate IP; it browses as usual.</div></li>
+        <li><span class="dot" style="background:var(--drop)"></span><div><b>Matched web → proxy.</b> Workstation <code>:80</code> (+<code>:443</code>) is <code>REDIRECT</code>ed into <code>mitmproxy</code>; the one target URL is replaced by the addon, everything else passes through.</div></li>
+        <li><span class="dot" style="background:var(--net)"></span><div><b>Proxy outbound.</b> mitmproxy's own connections leave from the <em>Pi's</em> corporate IP — this is why the box is visible, not stealthy.</div></li>
+        <li><span class="dot" style="background:var(--oob)"></span><div><b>You → Pi.</b> Manage over the <code>wlan0</code> AP or the mgmt cable (<code>eth2</code>, <code>10.73.0.1</code>); the drop rides those too.</div></li>
+        <li><span class="dot" style="background:var(--block)"></span><div><b>Caveats.</b> HTTPS needs the proxy CA trusted on the target; QUIC/UDP-443 is dropped so HTTP/3 can't bypass; assumes no 802.1X and no PAC/VPN on the target.</div></li>
+      </ul>
+    </div>
+  </section>
+
+  <!-- ============================= COMPARE VIEW ============================= -->
+  <section class="view" id="view-cmp">
+    <div class="tbl-scroll">
+      <table>
+        <thead><tr>
+          <th>Aspect</th>
+          <th class="c-ap">AP <span class="k">pi_ap_dropbox_setup.sh</span></th>
+          <th class="c-br">Bridge <span class="k">pi_bridge_setup.sh</span></th>
+          <th class="c-ic">Intercept <span class="k">pi_intercept_setup.sh</span></th>
+        </tr></thead>
+        <tbody>
+          <tr><th>Wired role</th><td>Pi <em>is</em> the network</td><td>transparent L2 passthrough</td><td>inline active MITM</td></tr>
+          <tr><th>Stealth</th><td>n/a (visible)</td><td><b style="color:var(--pass)">invisible</b> — Pi muted on the wire</td><td><b style="color:var(--net)">visible</b> — Pi is a host on the corp net</td></tr>
+          <tr><th>L2 / L3</th><td>L3 (router/NAT)</td><td>pure L2 · <code>bridge-nf=0</code></td><td>L3-aware · <code>br_netfilter=1</code> · <code>ip_forward=1</code></td></tr>
+          <tr><th>Wired NICs</th><td>1</td><td>2 (+1 mgmt)</td><td>2 (+1 mgmt cable)</td></tr>
+          <tr><th>Pi's IP on the wire</th><td>AP gateway IPs</td><td>none (members bare; <code>KARASU_IP</code> hidden)</td><td>a real <strong>corporate IP</strong> on <code>br0</code></td></tr>
+          <tr><th>Client addressing</th><td>the Pi (<code>dnsmasq</code>)</td><td>the real router (forwarded)</td><td>the real corp DHCP (forwarded)</td></tr>
+          <tr><th>Does to traffic</th><td>serves drop · optional NAT</td><td>forwards verbatim</td><td>rewrites one URL via mitmproxy</td></tr>
+          <tr><th>HTTPS</th><td>n/a</td><td>passes through untouched</td><td>intercept needs <strong>CA on target</strong></td></tr>
+          <tr><th>Pi's own internet</th><td>via uplink</td><td><b style="color:var(--block)">none</b> (offline by design)</td><td>yes (needs it for the proxy)</td></tr>
+          <tr><th>Manage via</th><td>wlan0 / eth0 / IPs</td><td>wlan0 / console / mgmt NIC</td><td>wlan0 AP + mgmt cable</td></tr>
+          <tr><th>Assumes</th><td>—</td><td>passive MAC monitoring, no 802.1X</td><td>no 802.1X, no PAC/VPN, TCP (not QUIC)</td></tr>
+          <tr><th>Status</th><td>shipped (v0.12)</td><td>v0.4 — bench, passthrough pending</td><td>v0.1 — unvalidated on hardware</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <section>
+      <div class="grid2">
+        <div class="card panel stay">
+          <h3>Constant in all three modes</h3>
+          <ul>
+            <li>One device — hostname <code>karasu</code>, product Yatagarasu.</li>
+            <li><code>updrop</code> — binds <code>::</code>, serves the drop on whatever is up.</li>
+            <li><code>wlan0</code> AP — clients plane (AP) or out-of-band mgmt plane (bridge / intercept).</li>
+            <li><code>karasu.local</code> — Avahi mDNS.</li>
+            <li>Provision once, then live ops — no reboot.</li>
+          </ul>
+        </div>
+        <div class="card panel stay" style="--pass:var(--accent)">
+          <h3>Pick by goal</h3>
+          <ul>
+            <li><b style="color:var(--drop)">Move files in the field</b> with no infra → <b>AP</b>.</li>
+            <li><b style="color:var(--pass)">Add a file plane to a server's link, invisibly</b> → <b>Bridge</b>.</li>
+            <li><b style="color:var(--net)">Tamper with one web page on a test workstation</b> → <b>Intercept</b>.</li>
+            <li>AP + cable management works in all three.</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <p class="eyebrow">Non-negotiables (inline modes)</p>
+      <div class="rules">
+        <div class="rule ok"><h4>Members carry no IP (bridge)</h4><p>A bridge member that keeps its own address makes the Pi <b>half-route and leak</b>. <code>up</code> flushes both and forces NetworkManager to release them.</p></div>
+        <div class="rule"><h4>Stealth vs visible is a choice</h4><p>Bridge = the <code>ebtables</code> mute keeps the Pi silent. Intercept is the opposite — a visible host that NATs its own proxy traffic. Don't confuse the two.</p></div>
+        <div class="rule ok"><h4>Manage out-of-band</h4><p>Drive <code>up</code>/<code>down</code> over console, <code>wlan0</code>, or the mgmt cable — <b>never the inline wire</b>, which flaps when the bridge builds.</p></div>
+        <div class="rule"><h4>Real uplink, not a tether</h4><p>The upstream must be a real switch/router port. A single-client USB <b>tether</b> (one MAC, NAT) can't bridge a second host.</p></div>
+        <div class="rule"><h4>HTTPS costs trust (intercept)</h4><p>Silent HTTPS rewrite needs the proxy <b>CA installed</b> on the target. QUIC is dropped and IPv6 skipped so nothing bypasses the TCP redirect.</p></div>
+        <div class="rule"><h4>Not for 802.1X ports</h4><p>All inline modes assume passive MAC monitoring. An authenticating port needs EAPOL pass-through, or insertion err-disables it.</p></div>
+      </div>
+    </section>
+  </section>
+
+  <footer>Yatagarasu · karasu — AP v0.12 · updrop v0.2 · bridge v0.4 · intercept v0.1 · diagram 2026-10-12</footer>
+</div>
+
+<script>
+  var VIEWS=['ap','br','ic','cmp'];
+  var TITLES={ap:'AP mode',br:'Bridge mode',ic:'Intercept mode',cmp:'Three wired roles, one box'};
+  function setView(v){
+    if(VIEWS.indexOf(v)<0)v='cmp';
+    VIEWS.forEach(function(x){
+      document.getElementById('btn-'+x).setAttribute('aria-pressed',x===v);
+      document.getElementById('view-'+x).hidden=(x!==v);
+    });
+    document.getElementById('pgtitle').textContent=TITLES[v];
+    try{localStorage.setItem('yata-view',v);}catch(e){}
+  }
+  var start='cmp';
+  try{var s=localStorage.getItem('yata-view');if(s&&VIEWS.indexOf(s)>=0)start=s;}catch(e){}
+  setView(start);
+</script>

@@ -55,8 +55,12 @@
 # =============================================================================
 set -euo pipefail
 
+# --- shared identity (optional single source of truth; overrides the CONFIG below) ---
+_SHARED_CONF="${PI_MODE_CONF:-/etc/pi-mode/pi-mode.conf}"
+[[ -r "$_SHARED_CONF" ]] && . "$_SHARED_CONF" || true
+
 ### ---- CONFIG (used by 'setup' only) ----------------------------------------
-IFACE="wlan0"
+IFACE="${WLAN_IFACE:-wlan0}"
 SSID="karasu"
 PSK="yatagarasu"                                 # >= 8 chars (TEST cred — change before real use)
 COUNTRY="CZ"                                    # ISO-3166 regulatory domain — REQUIRED (drives TX power)
@@ -70,12 +74,12 @@ DHCP_END="192.168.150.150"
 NETMASK="255.255.255.0"
 
 # --- hostname / mDNS (reach the Pi by name, no IP or port) ---
-PI_HOSTNAME="karasu"                          # system hostname -> http://karasu.local  (mDNS)
+PI_HOSTNAME="${PI_HOSTNAME:-karasu}"                          # system hostname -> http://karasu.local  (mDNS)
 ENABLE_MDNS="1"                                  # advertise <PI_HOSTNAME>.local on wlan0+eth0 only (never on an uplink NIC)
 
 # --- wired workstation link (eth0) ---
 ENABLE_ETH="1"                                   # 1 = configure eth0 for a wired workstation
-ETH_IFACE="eth0"
+ETH_IFACE="${WIRED_IFACE:-eth0}"
 ETH_MAC="keep"                                   # eth0 MAC before it hits the wire: keep | random | AA:BB:CC:DD:EE:FF
 ETH_IP="192.168.160.1"                            # Pi's fixed address on the wire
 ETH_DHCP="1"                                     # 1 = hand the workstation an IP (SAFE ONLY on a direct/dedicated cable)
@@ -92,7 +96,7 @@ LOCAL_DNS="1"                                    # 1 = isolated mode still serve
                                                  # 0 = isolated clients get no DNS at all -> only IP or <name>.local (mDNS)
 
 UPLOAD_DIR="/srv/updrop"
-UPLOAD_PORT="80"                                 # 80 = reach it portless (http://karasu.local); non-root binds it via CAP_NET_BIND_SERVICE
+UPLOAD_PORT="${UPLOAD_PORT:-80}"                                 # 80 = reach it portless (http://karasu.local); non-root binds it via CAP_NET_BIND_SERVICE
 UPLOAD_USER="updrop"
 SERVER_BIND="::"                                 # :: = all IPv4+IPv6 ; 0.0.0.0 = all IPv4 ; or one address
 

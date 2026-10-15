@@ -23,3 +23,6 @@ Thumbs.db
 
 # field manual — offensive-ops doc, keep out of the public repo
 FIELD_MANUAL.md
+
+# internal product roadmap — not shipped
+ROADMAP.md

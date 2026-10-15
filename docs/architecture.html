@@ -132,6 +132,7 @@
       <button id="btn-ap" aria-pressed="false" onclick="setView('ap')">AP</button>
       <button id="btn-br" aria-pressed="false" onclick="setView('br')">Bridge</button>
       <button id="btn-ic" aria-pressed="false" onclick="setView('ic')">Intercept</button>
+      <button id="btn-cl" aria-pressed="false" onclick="setView('cl')">Clean</button>
       <button id="btn-cmp" aria-pressed="true" onclick="setView('cmp')">Compare</button>
     </div>
   </div>
@@ -335,6 +336,47 @@
   </section>
 
   <!-- ============================= COMPARE VIEW ============================= -->
+  <section class="view" id="view-cl" hidden>
+    <div class="card">
+      <div class="diagram-cap">
+        <h2>Clean mode</h2><span class="tag">pi-mode clean</span>
+        <p>No AP, no bridge, no rules — the Pi is a stock NetworkManager host. For storage, transit between jobs, or a clean handoff; nothing marks it as Yatagarasu on the wire.</p>
+      </div>
+      <div class="svg-scroll">
+        <svg class="topo" viewBox="0 0 820 340" role="img" aria-label="Clean mode: wlan0, eth0 and usb0 all handed back to NetworkManager as ordinary clients; no SSID, no bridge, no rules.">
+          <defs>
+            <marker id="cl-net" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="var(--muted)"/></marker>
+          </defs>
+          <rect class="n-pi" x="40" y="22" width="372" height="296" rx="14"/>
+          <text class="t-pi" x="56" y="46">Raspberry Pi · karasu</text>
+          <text class="t-s" x="56" y="66">stock host — managed by NetworkManager</text>
+          <rect class="n-sub" x="56" y="84" width="340" height="44" rx="8"/>
+          <text class="t" x="66" y="106">wlan0</text><text class="t-s" x="150" y="106">NM-managed · no AP, no SSID</text>
+          <rect class="n-sub" x="56" y="138" width="340" height="44" rx="8"/>
+          <text class="t" x="66" y="160">eth0</text><text class="t-s" x="150" y="160">NM-managed · DHCP client</text>
+          <rect class="n-sub" x="56" y="192" width="340" height="44" rx="8"/>
+          <text class="t" x="66" y="214">usb0</text><text class="t-s" x="150" y="214">NM-managed · DHCP client</text>
+          <rect class="badge-off" x="56" y="250" width="340" height="52" rx="8"/>
+          <text class="t-s" x="66" y="272">no br0 · no ebtables/iptables · ip_forward=0</text>
+          <text class="t-s" x="66" y="290">no dnsmasq · no updrop served</text>
+          <rect class="n-cloud" x="620" y="146" width="170" height="66" rx="22"/>
+          <text class="t" x="705" y="178" text-anchor="middle">Any network</text>
+          <text class="t-s" x="705" y="196" text-anchor="middle">normal DHCP client</text>
+          <path class="flow" style="stroke:var(--muted)" d="M412 172 H620" marker-end="url(#cl-net)"/>
+          <text class="flab" x="470" y="162">ordinary networking</text>
+        </svg>
+      </div>
+      <div class="legend">
+        <span><i style="background:var(--muted)"></i> ordinary networking (NetworkManager)</span>
+      </div>
+      <ul class="flows">
+        <li><span class="dot" style="background:var(--muted)"></span><div><b>Everything handed back.</b> <code>wlan0</code>, <code>eth0</code> and <code>usb0</code> return to NetworkManager as ordinary clients — no static IPs, no <code>br0</code>.</div></li>
+        <li><span class="dot" style="background:var(--block)"></span><div><b>Nothing served, nothing broadcast.</b> <code>hostapd</code> off → <b>no <code>karasu</code> SSID</b>; no <code>dnsmasq</code>, no <code>updrop</code>; no <code>ebtables</code>/<code>iptables</code> rules; <code>ip_forward=0</code>.</div></li>
+        <li><span class="dot" style="background:var(--muted)"></span><div><b>The Pi is just a host.</b> It takes its own normal uplink/DHCP like any laptop; nothing identifies it as the appliance on the wire.</div></li>
+      </ul>
+    </div>
+  </section>
+
   <section class="view" id="view-cmp">
     <div class="tbl-scroll">
       <table>
@@ -362,6 +404,40 @@
     </div>
 
     <section>
+      <p class="eyebrow">Switching modes — pi-mode</p>
+      <div class="card">
+        <div class="svg-scroll">
+          <svg class="topo" viewBox="0 0 820 300" role="img" aria-label="pi-mode switches between AP, Bridge, Intercept and Clean; each swap is reboot-first and rebuilt from a clean slate.">
+            <defs>
+              <marker id="sw-a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="var(--oob)"/></marker>
+            </defs>
+            <rect class="n-pi" x="320" y="110" width="180" height="80" rx="14"/>
+            <text class="t-pi" x="410" y="138" text-anchor="middle">pi-mode</text>
+            <text class="t-s" x="410" y="158" text-anchor="middle">marker + reboot</text>
+            <text class="t-s" x="410" y="176" text-anchor="middle">pi-mode-apply.service</text>
+            <rect class="n-box" x="40" y="28" width="210" height="62" rx="10"/>
+            <text class="t" x="60" y="54">AP</text><text class="t-s" x="60" y="76">the network · 1 NIC</text>
+            <rect class="n-box" x="40" y="210" width="210" height="62" rx="10"/>
+            <text class="t" x="60" y="236">Bridge</text><text class="t-s" x="60" y="258">invisible L2 · 2 NIC</text>
+            <rect class="n-box" x="570" y="28" width="210" height="62" rx="10"/>
+            <text class="t" x="590" y="54">Intercept</text><text class="t-s" x="590" y="76">visible MITM · 2 NIC</text>
+            <rect class="n-box" x="570" y="210" width="210" height="62" rx="10"/>
+            <text class="t" x="590" y="236">Clean</text><text class="t-s" x="590" y="258">stock NM · no SSID</text>
+            <path class="flow f-oob" d="M320 136 L250 66" marker-start="url(#sw-a)" marker-end="url(#sw-a)"/>
+            <path class="flow f-oob" d="M320 164 L250 234" marker-start="url(#sw-a)" marker-end="url(#sw-a)"/>
+            <path class="flow f-oob" d="M500 136 L570 66" marker-start="url(#sw-a)" marker-end="url(#sw-a)"/>
+            <path class="flow f-oob" d="M500 164 L570 234" marker-start="url(#sw-a)" marker-end="url(#sw-a)"/>
+          </svg>
+        </div>
+        <ul class="flows">
+          <li><span class="dot" style="background:var(--oob)"></span><div><b>Any role, one command.</b> <code>sudo pi-mode ap|bridge|intercept|clean</code> writes <code>/etc/pi-mode/mode</code>, fixes the persistent state, and reboots.</div></li>
+          <li><span class="dot" style="background:var(--oob)"></span><div><b>Reboot-first = clean slate.</b> On boot <code>pi-mode-apply.service</code> rebuilds the selected mode from scratch, so no residue (stale <code>br0</code>, <code>ebtables</code>, <code>ip_forward</code>) carries over. <code>--now</code> is a best-effort live swap for iteration.</div></li>
+          <li><span class="dot" style="background:var(--oob)"></span><div><b>Manage out-of-band.</b> Drive swaps from console / <code>wlan0</code> / mgmt cable — never the wire being bridged, and never <code>wlan0</code> when switching to <code>clean</code>.</div></li>
+        </ul>
+      </div>
+    </section>
+
+    <section>
       <div class="grid2">
         <div class="card panel stay">
           <h3>Constant in all three modes</h3>
@@ -380,6 +456,7 @@
             <li><b style="color:var(--drop)">Move files in the field</b> with no infra → <b>AP</b>.</li>
             <li><b style="color:var(--pass)">Add a file plane to a server's link, invisibly</b> → <b>Bridge</b>.</li>
             <li><b style="color:var(--net)">Tamper with one web page on a test workstation</b> → <b>Intercept</b>.</li>
+            <li><b style="color:var(--oob)">Store, move between jobs, or hand off the box</b> → <b>Clean</b> (no SSID, no trace).</li>
             <li>AP + cable management works in all three.</li>
           </ul>
         </div>
@@ -403,8 +480,8 @@
 </div>
 
 <script>
-  var VIEWS=['ap','br','ic','cmp'];
-  var TITLES={ap:'AP mode',br:'Bridge mode',ic:'Intercept mode',cmp:'Three wired roles, one box'};
+  var VIEWS=['ap','br','ic','cl','cmp'];
+  var TITLES={ap:'AP mode',br:'Bridge mode',ic:'Intercept mode',cl:'Clean mode',cmp:'Three wired roles, one box'};
   function setView(v){
     if(VIEWS.indexOf(v)<0)v='cmp';
     VIEWS.forEach(function(x){

@@ -42,6 +42,8 @@
 #        NEVER over the bridged wire — bringing the bridge up flaps both members)
 #
 #  Changelog:
+#    v0.2  mgmt DHCP pool derived from MGMT_IP/MGMT_PREFIX (was hardcoded 10.73.0.x
+#          /24 -> wrong subnet if pi-mode.conf moves MGMT_IP); overrides validated.
 #    v0.1  initial inline-intercept mode (bridge + br_netfilter + REDIRECT to a
 #          mitmproxy addon that rewrites one exact URL; AP + mgmt-cable plane kept).
 #          UNVALIDATED ON HARDWARE — bench-test the exact cabling first.
@@ -71,8 +73,8 @@ MGMT_IFACE="${MGMT_IFACE:-eth2}"         # the mgmt NIC — MUST differ from WS_
 MGMT_IP="${MGMT_IP:-10.73.0.1}"       # pick a subnet that will NOT overlap the corporate net
 MGMT_PREFIX="${MGMT_PREFIX:-24}"
 MGMT_DHCP="1"             # hand the ops laptop an address via a dedicated dnsmasq
-MGMT_DHCP_START="10.73.0.50"
-MGMT_DHCP_END="10.73.0.150"
+MGMT_DHCP_START=""        # empty = derived from MGMT_IP/MGMT_PREFIX (set both to override)
+MGMT_DHCP_END=""
 
 # --- intercept / proxy --------------------------------------------------------
 PROXY_PORT="8080"
@@ -224,6 +226,26 @@ br0_address(){
   fi
 }
 
+ip2int(){ local IFS=. a b c d; read -r a b c d <<<"$1"; echo $(( (a<<24) | (b<<16) | (c<<8) | d )); }
+int2ip(){ local n=$1; echo "$(( (n>>24)&255 )).$(( (n>>16)&255 )).$(( (n>>8)&255 )).$(( n&255 ))"; }
+mgmt_dhcp_range(){   # -> "start end netmask" for the mgmt DHCP pool, derived from MGMT_IP/MGMT_PREFIX
+  local p="$MGMT_PREFIX" ip mask net bc s e
+  (( p >= 8 && p <= 29 )) || { echo "!! MGMT_PREFIX /$p unsupported for mgmt DHCP (use /8-/29)" >&2; return 1; }
+  ip=$(ip2int "$MGMT_IP"); mask=$(( (0xFFFFFFFF << (32 - p)) & 0xFFFFFFFF ))
+  net=$(( ip & mask )); bc=$(( net | (~mask & 0xFFFFFFFF) ))
+  if [[ -n "${MGMT_DHCP_START:-}" && -n "${MGMT_DHCP_END:-}" ]]; then   # explicit override: validate it
+    s=$(ip2int "$MGMT_DHCP_START"); e=$(ip2int "$MGMT_DHCP_END")
+    (( (s & mask) == net && (e & mask) == net && s <= e )) || {
+      echo "!! MGMT_DHCP_START/END (${MGMT_DHCP_START}-${MGMT_DHCP_END}) is not inside ${MGMT_IP}/${p}" >&2; return 1; }
+  elif (( bc - net >= 160 )); then s=$(( net + 50 )); e=$(( net + 150 ))
+  else s=$(( net + 2 )); e=$(( bc - 1 )); fi
+  if (( ip >= s && ip <= e )); then                        # never lease the Pi's own address
+    if (( ip - s >= e - ip )); then e=$(( ip - 1 )); else s=$(( ip + 1 )); fi
+  fi
+  (( s <= e )) || { echo "!! no room for a mgmt DHCP pool in ${MGMT_IP}/${p}" >&2; return 1; }
+  echo "$(int2ip "$s") $(int2ip "$e") $(int2ip "$mask")"
+}
+
 mgmt_up(){
   [[ "$ENABLE_MGMT" == "1" ]] || return 0
   echo "[*] mgmt cable ${MGMT_IFACE} -> ${MGMT_IP}/${MGMT_PREFIX} (not bridged)"
@@ -232,17 +254,20 @@ mgmt_up(){
   ip link set "$MGMT_IFACE" up
   ip addr add "${MGMT_IP}/${MGMT_PREFIX}" dev "$MGMT_IFACE"
   if [[ "$MGMT_DHCP" == "1" ]] && have dnsmasq; then
+    local d_start d_end d_mask
+    read -r d_start d_end d_mask <<<"$(mgmt_dhcp_range)" || return 1
+    [[ -n "$d_start" ]] || return 1
     pkill -f "dnsmasq.*--conf-file=/etc/dnsmasq-mgmt.conf" 2>/dev/null || true
     cat >/etc/dnsmasq-mgmt.conf <<EOF
 interface=${MGMT_IFACE}
 bind-interfaces
 no-resolv
-dhcp-range=${MGMT_DHCP_START},${MGMT_DHCP_END},255.255.255.0,12h
+dhcp-range=${d_start},${d_end},${d_mask},12h
 dhcp-option=3
 dhcp-option=6
 EOF
     dnsmasq --conf-file=/etc/dnsmasq-mgmt.conf --pid-file=/run/dnsmasq-mgmt.pid
-    echo "    mgmt DHCP on ${MGMT_IFACE}: ${MGMT_DHCP_START}-${MGMT_DHCP_END}"
+    echo "    mgmt DHCP on ${MGMT_IFACE}: ${d_start}-${d_end} /${MGMT_PREFIX} (no gw/dns)"
   fi
   echo "    reach the Pi at: ssh ...@${MGMT_IP}  /  http://${MGMT_IP}/"
 }

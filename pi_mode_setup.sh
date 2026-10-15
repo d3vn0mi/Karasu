@@ -48,6 +48,10 @@
 #     sessions by definition.
 #
 #  Changelog:
+#    v0.2  fix: 'clean' deleted 99-unmanaged-ap.conf and nothing restored it, so
+#          after clean -> ap/bridge/intercept + reboot NetworkManager re-owned
+#          wlan0, auto-joined a saved Wi-Fi and hostapd could not run (no SSID).
+#          ap + overlays now (re)write the conf via ensure_nm_ap_conf.
 #    v0.1  initial unified switcher: reboot-first mode swap via a marker +
 #          pi-mode-apply.service; full 'clean' (stock NetworkManager) teardown that
 #          also neutralises the known cross-mode residue; 'status' live detection;
@@ -105,6 +109,12 @@ enable_units(){  for u in "$@"; do systemctl enable "$u" >/dev/null 2>&1 || true
 disable_units(){ for u in "$@"; do systemctl disable "$u" >/dev/null 2>&1 || true; done; }
 start_units(){   for u in "$@"; do systemctl start "$u"  2>/dev/null || true; done; }
 stop_units(){    for u in "$@"; do systemctl stop "$u"   2>/dev/null || true; done; }
+
+ensure_nm_ap_conf(){   # persistently keep NetworkManager off the AP radio (+ wired AP NIC)
+  install -d "$(dirname "$NM_AP")"
+  printf '[keyfile]\nunmanaged-devices=interface-name:%s;interface-name:%s\n' "$WLAN_IFACE" "$WIRED_IFACE" >"$NM_AP"
+  systemctl reload NetworkManager 2>/dev/null || true
+}
 
 nm_managed(){    # yes|no  iface...
   local state="$1"; shift
@@ -180,6 +190,7 @@ mode_ap(){
   rm -f "$NM_BRIDGE" "$NM_INTERCEPT"
   strip_dhcpcd_deny
   enable_units "${AP_WLAN_UNITS[@]}" "${AP_WIRED_UNITS[@]}"
+  ensure_nm_ap_conf
   nm_managed no "$WLAN_IFACE" "$WIRED_IFACE"
   echo ap >"$MODE_FILE"
   if [[ "${DO_NOW:-0}" == "1" ]]; then
@@ -205,6 +216,8 @@ mode_overlay(){   # $1 = bridge|intercept   $2 = script
   strip_dhcpcd_deny
   # drop the OTHER overlay's NM conf; keep AP's (wlan0 must stay NM-unmanaged)
   if [[ "$name" == "bridge" ]]; then rm -f "$NM_INTERCEPT"; else rm -f "$NM_BRIDGE"; fi
+  ensure_nm_ap_conf
+  nm_managed no "$WLAN_IFACE"
   echo "$name" >"$MODE_FILE"
   if [[ "${DO_NOW:-0}" == "1" ]]; then
     teardown_overlays

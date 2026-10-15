@@ -40,6 +40,11 @@
 #        NEVER over the bridged wire — bringing the bridge up flaps eth0+eth1)
 #
 #  Changelog:
+#    v0.5  mgmt DHCP pool now derived from MGMT_IP/MGMT_PREFIX (was hardcoded
+#          192.168.160.x /24 -> wrong subnet when MGMT_IP=10.73.0.1); overrides validated.
+#          mDNS scoped to the operator side: karasu.local is advertised on wlan0
+#          (+ the mgmt NIC); br0 (server side) only if ENABLE_MDNS=1 (default 0) —
+#          the server reaches the drop at http://KARASU_IP/.
 #    v0.4  correctness/stealth fixes found on first hardware bring-up:
 #          * strip_member_l3 — flush IP+routes off BOTH bridge members on 'up'
 #            (a member that keeps its own IP/default route makes the Pi half-ROUTE
@@ -96,7 +101,8 @@ KARASU_PREFIX="${KARASU_PREFIX:-24}"        # the server subnet's prefix length 
 KARASU_HOSTNAME="${PI_HOSTNAME:-karasu}"  # advertised as <name>.local on the server side (mDNS)
 UPLOAD_PORT="${UPLOAD_PORT:-80}"
 
-ENABLE_MDNS="1"           # advertise karasu.local on the bridge (server side only)
+ENABLE_MDNS="0"           # 1 = ALSO answer karasu.local on br0 (server side). Default 0: the server
+                          #     uses http://KARASU_IP/; its own mDNS lookup would be bridged upstream.
 
 # Belt-and-suspenders: also clone the server's MAC onto the router-facing NIC.
 # Not required (the bridge preserves the server's src MAC and the Pi is muted on
@@ -119,8 +125,8 @@ MGMT_IFACE="${MGMT_IFACE:-eth2}"         # the 3rd NIC (NOT eth0/eth1)
 MGMT_IP="${MGMT_IP:-192.168.160.1}"   # Pi's address on the mgmt net  -> ssh/http here
 MGMT_PREFIX="${MGMT_PREFIX:-24}"
 MGMT_DHCP="0"             # 1 = hand the mgmt laptop an address via a dedicated dnsmasq
-MGMT_DHCP_START="192.168.160.50"
-MGMT_DHCP_END="192.168.160.150"
+MGMT_DHCP_START=""        # empty = derived from MGMT_IP/MGMT_PREFIX (set both to override)
+MGMT_DHCP_END=""
 
 # --- what the SERVER side may reach ON the Pi (KARASU_IP) ---------------------
 # Space-separated TCP ports the server segment is allowed to open on the Pi.
@@ -265,6 +271,26 @@ preflight_guard(){   # fail fast on impossible / dangerous interface choices
   fi
 }
 
+ip2int(){ local IFS=. a b c d; read -r a b c d <<<"$1"; echo $(( (a<<24) | (b<<16) | (c<<8) | d )); }
+int2ip(){ local n=$1; echo "$(( (n>>24)&255 )).$(( (n>>16)&255 )).$(( (n>>8)&255 )).$(( n&255 ))"; }
+mgmt_dhcp_range(){   # -> "start end netmask" for the mgmt DHCP pool, derived from MGMT_IP/MGMT_PREFIX
+  local p="$MGMT_PREFIX" ip mask net bc s e
+  (( p >= 8 && p <= 29 )) || { echo "!! MGMT_PREFIX /$p unsupported for mgmt DHCP (use /8-/29)" >&2; return 1; }
+  ip=$(ip2int "$MGMT_IP"); mask=$(( (0xFFFFFFFF << (32 - p)) & 0xFFFFFFFF ))
+  net=$(( ip & mask )); bc=$(( net | (~mask & 0xFFFFFFFF) ))
+  if [[ -n "${MGMT_DHCP_START:-}" && -n "${MGMT_DHCP_END:-}" ]]; then   # explicit override: validate it
+    s=$(ip2int "$MGMT_DHCP_START"); e=$(ip2int "$MGMT_DHCP_END")
+    (( (s & mask) == net && (e & mask) == net && s <= e )) || {
+      echo "!! MGMT_DHCP_START/END (${MGMT_DHCP_START}-${MGMT_DHCP_END}) is not inside ${MGMT_IP}/${p}" >&2; return 1; }
+  elif (( bc - net >= 160 )); then s=$(( net + 50 )); e=$(( net + 150 ))
+  else s=$(( net + 2 )); e=$(( bc - 1 )); fi
+  if (( ip >= s && ip <= e )); then                        # never lease the Pi's own address
+    if (( ip - s >= e - ip )); then e=$(( ip - 1 )); else s=$(( ip + 1 )); fi
+  fi
+  (( s <= e )) || { echo "!! no room for a mgmt DHCP pool in ${MGMT_IP}/${p}" >&2; return 1; }
+  echo "$(int2ip "$s") $(int2ip "$e") $(int2ip "$mask")"
+}
+
 mgmt_up(){   # bring up the out-of-band mgmt NIC with a static IP, OUTSIDE the bridge
   [[ "$ENABLE_MGMT" == "1" ]] || return 0
   echo "[*] Management NIC ${MGMT_IFACE} -> ${MGMT_IP}/${MGMT_PREFIX} (not bridged)..."
@@ -273,17 +299,20 @@ mgmt_up(){   # bring up the out-of-band mgmt NIC with a static IP, OUTSIDE the b
   ip link set "$MGMT_IFACE" up
   ip addr add "${MGMT_IP}/${MGMT_PREFIX}" dev "$MGMT_IFACE"
   if [[ "$MGMT_DHCP" == "1" ]] && have dnsmasq; then
+    local d_start d_end d_mask
+    read -r d_start d_end d_mask <<<"$(mgmt_dhcp_range)" || return 1
+    [[ -n "$d_start" ]] || return 1
     pkill -f "dnsmasq.*--conf-file=/etc/dnsmasq-mgmt.conf" 2>/dev/null || true
     cat >/etc/dnsmasq-mgmt.conf <<EOF
 interface=${MGMT_IFACE}
 bind-interfaces
 no-resolv
-dhcp-range=${MGMT_DHCP_START},${MGMT_DHCP_END},255.255.255.0,12h
+dhcp-range=${d_start},${d_end},${d_mask},12h
 dhcp-option=3
 dhcp-option=6
 EOF
     dnsmasq --conf-file=/etc/dnsmasq-mgmt.conf --pid-file=/run/dnsmasq-mgmt.pid
-    echo "    mgmt DHCP on ${MGMT_IFACE}: ${MGMT_DHCP_START}-${MGMT_DHCP_END} (no gw/dns)"
+    echo "    mgmt DHCP on ${MGMT_IFACE}: ${d_start}-${d_end} /${MGMT_PREFIX} (no gw/dns)"
   fi
   echo "    reach the Pi out-of-band at: ssh ...@${MGMT_IP}   /   http://${MGMT_IP}/"
 }
@@ -353,7 +382,8 @@ bridge_up(){
 
   echo
   echo "[OK] bridge up.  Router sees ONLY the server's MAC+IP (verify from the switch/router)."
-  echo "     server reaches the drop at:  http://${KARASU_HOSTNAME}.local/   and   http://${KARASU_IP}/"
+  if [[ "$ENABLE_MDNS" == "1" ]]; then echo "     server reaches the drop at:  http://${KARASU_HOSTNAME}.local/   and   http://${KARASU_IP}/"
+  else echo "     server reaches the drop at:  http://${KARASU_IP}/   (no mDNS on br0 — use the IP or a hosts entry)"; fi
   if [[ -n "${ALLOW_SERVER_PORTS// /}" ]]; then
     echo "     server-side ports allowed on the Pi: ${ALLOW_SERVER_PORTS}$( printf %s "$ALLOW_SERVER_PORTS" | grep -qw 22 && echo "   (SSH OPEN — bench; set ALLOW_SERVER_PORTS=\"80\" for the field)" )"
   fi
@@ -396,19 +426,25 @@ apply_stealth(){
 }
 
 start_service(){
-  # Avahi: advertise karasu.local on the bridge (server side). mDNS responses are
-  # Pi-originated -> rule (1) already blocks their copy toward the router.
-  if [[ "$ENABLE_MDNS" == "1" ]] && have apt-get; then
-    apt-get install -y avahi-daemon >/dev/null 2>&1 || true
-    if [[ -f /etc/avahi/avahi-daemon.conf ]]; then
-      sed -i "s/^#\?host-name=.*/host-name=${KARASU_HOSTNAME}/" /etc/avahi/avahi-daemon.conf
-      if grep -q '^allow-interfaces=' /etc/avahi/avahi-daemon.conf; then
-        grep -q "${BR}" /etc/avahi/avahi-daemon.conf || sed -i "s/^allow-interfaces=.*/&,${BR}/" /etc/avahi/avahi-daemon.conf
-      else
-        sed -i "s/^\[server\]/[server]\nallow-interfaces=${BR}/" /etc/avahi/avahi-daemon.conf
-      fi
-      systemctl restart avahi-daemon 2>/dev/null || true
+  # Avahi scope: operator side always (wlan0 + mgmt NIC); br0 (server side) only if ENABLE_MDNS=1
+  if [[ -f /etc/avahi/avahi-daemon.conf ]]; then
+    local cur want i wl="${WLAN_IFACE:-wlan0}"
+    cur="$(sed -n 's/^allow-interfaces=//p' /etc/avahi/avahi-daemon.conf | head -n1)"
+    want=""
+    for i in ${cur//,/ }; do [[ "$i" == "$BR" || "$i" == "$MGMT_IFACE" ]] || want="${want:+$want,}$i"; done
+    [[ ",$want," == *",$wl,"* ]] || want="$wl${want:+,$want}"
+    [[ "$ENABLE_MGMT" == "1" ]] && want="$want,${MGMT_IFACE}"
+    [[ "$ENABLE_MDNS" == "1" ]] && want="$want,${BR}"
+    sed -i "s/^#\?host-name=.*/host-name=${KARASU_HOSTNAME}/" /etc/avahi/avahi-daemon.conf
+    if grep -q '^allow-interfaces=' /etc/avahi/avahi-daemon.conf; then
+      sed -i "s/^allow-interfaces=.*/allow-interfaces=${want}/" /etc/avahi/avahi-daemon.conf
+    else
+      sed -i "s/^\[server\]/[server]\nallow-interfaces=${want}/" /etc/avahi/avahi-daemon.conf
     fi
+    systemctl restart avahi-daemon 2>/dev/null || true
+    echo "    mDNS (karasu.local) on: ${want}"
+  else
+    echo "    (avahi not installed — name resolution only via IP; run the AP baseline setup to add it)"
   fi
   # updrop: if the AP setup already installed it bound to :: it is ALREADY serving
   # on ${KARASU_IP} (br0). Only start a fallback instance if nothing is listening.

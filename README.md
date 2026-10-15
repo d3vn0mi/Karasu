@@ -1,10 +1,19 @@
 # Yatagarasu
 
-Turn a Raspberry Pi into a standalone Wi-Fi access point **and** a wired-Ethernet drop, with a streaming file-drop server. Laptops join the Wi-Fi, a workstation plugs into Ethernet, and both sides upload/download from the *same* server over HTTP — the Pi *is* the network. Runs fully isolated, or shares its own uplink's internet out to every client.
+One portable Raspberry Pi that takes on **three mutually-exclusive wired roles**, with a Wi-Fi access point and a streaming file-drop server (`updrop`) constant across all of them:
+
+- **AP** — the Pi *is* the network: laptops join the Wi-Fi, a workstation plugs into Ethernet, and both read/write the *same* drop. Isolated by default, or NAT their traffic out an uplink.
+- **Bridge** — a transparent bump-in-the-wire between a server and its router: forwards the server's frames verbatim and stays mute to the router, while serving the drop to the server side.
+- **Intercept** — an inline, *visible* L3 host that redirects a workstation's web traffic through mitmproxy to rewrite one URL.
+- **Clean** — no AP, no bridge, no rules: stock NetworkManager, for storage and transit.
+
+Pick the role with one command — **`pi-mode ap|bridge|intercept|clean`** — which swaps safely (reboot-first, from a clean slate). The Wi-Fi AP + `updrop` stay up as the management / loot plane in every mode but `clean`.
 
 *Named for **Yatagarasu** (八咫烏), the three-legged guiding crow of myth — a RavenSec relay. Reachable by name at `http://karasu/`. Repo: `RPid-dropbox`.*
 
-Built for portable / field use: one control script with a `setup` mode and live `ops` commands, a dependency-free Go upload server (single static binary, streams straight to disk), and a systemd health-check timer.
+> **Docs map** — this README: full setup + AP reference · **`FIELD_MANUAL.md`**: operating in the field · **`docs/architecture.html`**: topology of every mode · **`mode_switch_bench.md`**: validate every mode/transition before field use.
+
+> **Authorized use only** — bridge and intercept go inline on a live link, and intercept tampers with traffic. Use them solely within a signed engagement whose scope covers inline insertion (and, for intercept, active MITM + installing a proxy CA on the in-scope host).
 
 ## Features
 
@@ -23,36 +32,100 @@ Built for portable / field use: one control script with a `setup` mode and live 
 
 | File | Purpose |
 |---|---|
-| `pi_ap_dropbox_setup.sh` | control script — `setup` (Wi-Fi + eth0) + live ops; installs itself as `/usr/local/bin/pi-ap` |
+| `pi_mode_setup.sh` | **the switcher** — `pi-mode ap\|bridge\|intercept\|clean\|status\|install`; installs itself as `/usr/local/bin/pi-mode` + a boot-apply unit |
+| `pi_mode.conf` | shared interface roles + identity, copied to `/etc/pi-mode/pi-mode.conf` — the single source of truth the mode scripts read |
+| `pi_ap_dropbox_setup.sh` | **AP baseline** — `setup` (Wi-Fi + eth0) + live `pi-ap` ops; installs itself as `/usr/local/bin/pi-ap` |
+| `pi_bridge_setup.sh` | **bridge mode** — transparent L2 bump-in-the-wire (`up\|down\|status\|detect`) |
+| `pi_intercept_setup.sh` | **intercept mode** — inline mitmproxy, rewrites one URL (`up\|down\|status\|ca`) |
 | `updrop.go` | the upload/download HTTP server — streaming uploads, styled web UI, dual-stack IPv4+IPv6 |
 | `pi_ap_healthcheck.sh` | layered health check (services, AP, DHCP, HTTP, upload integrity) |
+| `docs/architecture.html` | interactive topology of all modes (AP / Bridge / Intercept / Compare) |
+| `FIELD_MANUAL.md` · `mode_switch_bench.md` | field operator guide · pre-field validation checklist |
 
 ## Requirements
 
-- Raspberry Pi with Wi-Fi (onboard or USB), Raspberry Pi OS **Bookworm/Trixie** (NetworkManager default)
-- A Go toolchain to build the server on the Pi (`sudo apt install golang`), **or** cross-compile it elsewhere and drop the `updrop` binary next to the script
-- Root (`sudo`)
+- **Raspberry Pi** with Wi-Fi, Raspberry Pi OS **Bookworm/Trixie** (NetworkManager default). A Pi 4/5 for bridge/intercept (they need the throughput).
+- **Root** (`sudo`).
+- A **Go toolchain** to build the server on the Pi (`sudo apt install golang`), **or** cross-compile elsewhere and drop the `updrop` binary next to the script.
+- **For bridge / intercept only:** a **second wired NIC** (USB3 GbE → `usb0`) so the Pi can sit between two Ethernet segments. The upstream side must be a **real switch/router port**, not a single-client USB tether.
+- **For intercept only:** `mitmproxy` (installed by `pi-intercept-setup up`), plus a sanctioned way to install its CA on the in-scope workstation for HTTPS.
+- **Optional:** a third wired NIC (`eth2`) as an out-of-band management cable for the inline modes.
 
-## Quick start
+## Setup from zero
+
+From a fresh Raspberry Pi OS install to a device that can run every mode.
+
+**1 — OS & prerequisites.** Flash Raspberry Pi OS Bookworm/Trixie, boot, and get a shell — from the **console**, or SSH over your normal LAN, **not** over the `wlan0`/`eth0` interfaces setup is about to take over.
+
+```bash
+sudo raspi-config nonint do_wifi_country CZ    # set YOUR country — Wi-Fi TX power is capped until this is set
+sudo apt update && sudo apt install -y golang  # skip if you will cross-compile updrop elsewhere
+```
+
+**2 — Get the repo.**
 
 ```bash
 git clone https://github.com/d3vn0mi/RPid-dropbox.git
 cd RPid-dropbox
-# edit the CONFIG block at the top of pi_ap_dropbox_setup.sh (SSID, PSK, COUNTRY, ETH_*, ...)
-sudo bash pi_ap_dropbox_setup.sh setup
-sudo reboot          # first run only — lets NetworkManager fully release wlan0
 ```
 
-After reboot:
+**3 — Set your config.** Edit the `CONFIG` block at the top of `pi_ap_dropbox_setup.sh` (at least `SSID`, `PSK`, `COUNTRY`). Then edit **`pi_mode.conf`** so the interface roles match your rig: `WIRED_IFACE` (server/workstation side), `SECOND_IFACE` (router/uplink side), `MGMT_IFACE` + `MGMT_IP` (optional mgmt cable).
+
+**4 — Provision the AP baseline (required once).** This builds `updrop`, creates all the AP units, and installs the `pi-ap` command — every other mode builds on it. Run it from the **console**: setup reassigns `wlan0` and `eth0`, so an SSH session on either drops.
 
 ```bash
-sudo pi-ap show      # SSID, channel, TX power, regdomain, service states
-sudo pi-ap status    # full health check
+sudo bash pi_ap_dropbox_setup.sh setup
+sudo reboot                     # first run only — lets NetworkManager release wlan0
 ```
 
-Connect a client to the SSID, then open `http://karasu.local/upload`.
+After reboot, confirm the AP is healthy and reachable:
 
-> First run over SSH: do it from the **console** — setup reassigns both `wlan0` and `eth0`, so an SSH session riding either interface will drop.
+```bash
+sudo pi-ap show        # SSID, channel, TX power, regdom, services
+sudo pi-ap status      # full health check
+# join the SSID, then open http://karasu/  (or http://karasu.local/)
+```
+
+**5 — Install the mode switcher.** This copies `pi-mode` and the bridge/intercept scripts into `/usr/local/bin`, writes `/etc/pi-mode/pi-mode.conf` from your `pi_mode.conf`, and enables the boot-apply unit that rebuilds the selected mode on every boot.
+
+```bash
+sudo bash pi_mode_setup.sh install
+sudo pi-mode status    # selected vs live; boot-apply unit should read "enabled", mode = ap
+```
+
+You now have a working **AP**, switchable with `pi-mode`. That is the entire setup if AP is all you need.
+
+**6 — (Bridge / intercept only) add the second NIC + per-mode config.** Plug in the USB3 GbE adapter; confirm its name with `ip -br link` and make sure it matches `SECOND_IFACE` in `pi_mode.conf` (usually `usb0`).
+
+- **Bridge:** in `pi_bridge_setup.sh` set `KARASU_IP` to a free host in the *server's real subnet*, and `ALLOW_SERVER_PORTS="80"` for the field (hides SSH from the monitored server).
+- **Intercept:** in `pi_intercept_setup.sh` set `TARGET_HOST` / `TARGET_PATH` (the one URL to rewrite). For HTTPS, plan to install the proxy CA on the target (`sudo pi-intercept-setup ca`).
+
+**7 — Validate before any field use.** Work through **`mode_switch_bench.md`** on a lab rig — it proves every mode and every transition. The inline scripts are `bash -n` clean but **unvalidated on hardware**.
+
+## Modes & `pi-mode`
+
+One command selects the wired role; the Wi-Fi AP + `updrop` stay up as the out-of-band plane in every mode but `clean`.
+
+```bash
+sudo pi-mode ap          # the Pi is the network (AP + eth0 drop)
+sudo pi-mode bridge      # transparent bump-in-the-wire (eth0<->usb0), Pi invisible
+sudo pi-mode intercept   # inline mitmproxy (eth0<->usb0), Pi is a visible host
+sudo pi-mode clean       # stock NetworkManager — no SSID, no bridge, no rules
+sudo pi-mode status      # what is selected vs what is live right now
+```
+
+**Swaps are reboot-first by design.** A swap writes a marker (`/etc/pi-mode/mode`), fixes the persistent state (unit enablement, NM/dhcpcd/sysctl files), and reboots; on boot `pi-mode-apply.service` brings the mode up **from a clean slate**, so no residue (stale `br0`, `ebtables`, `ip_forward`, …) carries over from the previous mode. Append `--now` for a best-effort live swap (iteration only — prefer a reboot in the field). Every swap drops all sessions.
+
+| Mode | Wired role | NICs | Pi on the wire | Operate / read more |
+|---|---|---|---|---|
+| **ap** | the Pi is the network | 1 | AP gateway IPs | this README |
+| **bridge** | transparent L2 passthrough | 2 (+mgmt) | none — invisible | `FIELD_MANUAL.md` · `pi_bridge_setup.sh` |
+| **intercept** | inline MITM (one URL) | 2 (+mgmt) | a real corp IP — visible | `FIELD_MANUAL.md` · `pi_intercept_setup.sh` |
+| **clean** | stock networking | — | normal NM client | — |
+
+> **Manage out-of-band.** Drive a swap from the console, the `wlan0` AP, or the mgmt cable — **never** over the wire you are about to bridge, and never over `wlan0` when switching to `clean` (that tears down the AP you are on).
+
+The rest of this README documents **AP mode** in depth. Bridge and intercept operation live in `FIELD_MANUAL.md`; the topology of every mode is in `docs/architecture.html`.
 
 ## Building the server
 
@@ -223,7 +296,7 @@ Broadcast SSID: just pick it from the Wi-Fi list. Hidden SSID (`HIDDEN=1`): ente
 # Linux (NetworkManager) — works for hidden networks too:
 sudo nmcli connection add type wifi con-name karasu ifname wlan0 ssid "karasu" \
   802-11-wireless.hidden yes wifi-sec.key-mgmt wpa-psk wifi-sec.psk "yatagarasu"
-sudo nmcli connection up pidrop
+sudo nmcli connection up karasu
 ```
 
 - **macOS:** `networksetup -setairportnetwork en0 karasu yatagarasu` (works for hidden), or Wi-Fi menu → Other…

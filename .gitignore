@@ -1,2 +1,25 @@
-HANDOVER.md
-next_version.md
+# compiled server binary — build it with: go build -o updrop updrop.go
+/updrop
+/updrop-*
+*.exe
+
+# Go build / test artifacts
+*.o
+*.test
+*.out
+
+# editor / OS cruft
+*~
+*.swp
+.DS_Store
+Thumbs.db
+.idea/
+
+# VS Code — keep sftp.json (deploy creds) and workspace settings OUT of git
+.vscode/
+
+# logs / scratch
+*.log
+
+# field manual — offensive-ops doc, keep out of the public repo
+FIELD_MANUAL.md
